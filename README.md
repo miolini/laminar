@@ -50,6 +50,19 @@ Laminar implements a sophisticated scheduling algorithm:
 ### 1. The "Sieve" Architecture
 Laminar's data plane is built around a concept called the **Sieve**. Instead of a traditional bridge that blindly forwards packets, the Sieve treats the virtual interface as a classification and transformation engine.
 
+```mermaid
+graph TD
+    TAP[TAP Interface] --> Class[Classifier]
+    Class -->|Interactive: ICMP/SSH/ARP| Prio[Priority Queue]
+    Class -->|Bulk: TCP Payload| Frag[Fragmenter]
+    Prio --> Sched[Scheduler]
+    Frag -->|LaminarChunks| Sched
+    Sched -->|Link 1: 5G| QUIC1[QUIC Endpoint 1]
+    Sched -->|Link 2: Starlink| QUIC2[QUIC Endpoint 2]
+    QUIC1 --> Network((Internet))
+    QUIC2 --> Network
+```
+
 - **Classifier**: Every frame is inspected. Small packets (MTU < 150 bytes) or those with interactive signatures (TCP SYN/ACK, SSH, ARP) are prioritized for the lowest-latency link.
 - **Fragmenter**: If an L2 frame exceeds the Path MTU (PMTU) of the underlying QUIC transport, it is sliced into `LaminarChunks`.
 
@@ -66,14 +79,21 @@ struct LaminarHeader {
 }
 ```
 
-This allows Laminar to support **Jumbo Frames** (up to 64KB) over standard 1500-byte internet links with zero-copy reassembly.
+#### Packet Lifecycle
+1.  **Ingress**: 9000-byte Jumbo Frame arrives from TAP.
+2.  **Slicing**: Fragmenter cuts it into 7 chunks (~1300 bytes each).
+3.  **Encapsulation**: Each chunk gets an 11-byte `LaminarHeader`.
+4.  **Transport**: Each chunk is sent as a separate **QUIC Datagram**.
+5.  **Reassembly**: Receiver waits for all fragments of `frame_id`. Once complete, it's injected into the target TAP.
 
-### 3. Multi-path QUIC Datagrams
+### 3. Multi-path QUIC Datagrams & Congestion
 Laminar spawns **one QUIC Endpoint per physical interface**.
 - Interface `eth0` -> Connection A
 - Interface `wlan0` -> Connection B
 
-The scheduler maintains a real-time table of RTT and congestion windows for each connection. When a frame arrives, the "Water-Filling" algorithm fills the primary link's window first, then spills excess traffic into secondary links.
+The scheduler maintains a real-time table of RTT and congestion windows for each connection.
+- **Congestion Control**: We leverage QUIC's internal BBR/Cubic to manage the available bandwidth per link.
+- **Aggregation**: The "Water-Filling" algorithm fills the primary link's window first, then spills excess traffic into secondary links. This avoids the "slowest link bottleneck" common in simple round-robin VPNs.
 
 ### 4. macOS L3 Fallback (Fake L2)
 Standard macOS does not support TAP (Layer 2) devices without third-party kernel extensions. To ensure out-of-the-box compatibility, Laminar implements a **Fake L2** emulation:
