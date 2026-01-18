@@ -166,7 +166,11 @@ ipv4_mask = "255.255.255.0"
 ipv4_gateway = "10.100.0.254"
 
 # TLS Identity
-private_key = "key.pem"
+private_key = """
+-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEI... (your private key here)
+-----END PRIVATE KEY-----
+"""
 
 # Bonding Configuration
 # "water_filling" | "random" | "sticky"
@@ -277,8 +281,12 @@ Add to your `flake.nix`:
     enable = true;
     listen = "[::]:9000";
     
-    # Path to secret key
-    privateKeyFile = "/run/secrets/laminar/key.pem";
+    # Secret key PEM string
+    privateKey = ''
+      -----BEGIN PRIVATE KEY-----
+      ...
+      -----END PRIVATE KEY-----
+    '';
     
     # Static Network Configuration (optional, defaults to DHCP)
     dhcp = false;

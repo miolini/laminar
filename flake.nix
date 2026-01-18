@@ -101,7 +101,7 @@
             node = {
               listen = cfg.listen;
               mtu = cfg.mtu;
-              private_key = cfg.privateKeyFile;
+              private_key = cfg.privateKey;
               streams = cfg.streams;
               bonding_mode = cfg.bondingMode;
               mac_address = cfg.macAddress;
@@ -149,8 +149,9 @@
               default = null;
             };
 
-            privateKeyFile = lib.mkOption {
-              type = lib.types.path;
+            privateKey = lib.mkOption {
+              type = lib.types.str;
+              description = "The private key PEM content for the node.";
             };
 
             streams = lib.mkOption {

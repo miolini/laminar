@@ -82,13 +82,12 @@ fn configure_server(config: &crate::config::NodeConfig) -> anyhow::Result<quinn:
 }
 
 fn load_identity(
-    path: &str,
+    pem_content: &str,
 ) -> anyhow::Result<(
     Vec<rustls::pki_types::CertificateDer<'static>>,
     rustls::pki_types::PrivateKeyDer<'static>,
 )> {
-    let file_content = std::fs::read_to_string(path)?;
-    let key_pair = rcgen::KeyPair::from_pem(&file_content)
+    let key_pair = rcgen::KeyPair::from_pem(pem_content)
         .map_err(|e| anyhow::anyhow!("Failed to parse key: {}", e))?;
 
     let subject_alt_names = vec!["localhost".to_string(), "laminar-node".to_string()];
