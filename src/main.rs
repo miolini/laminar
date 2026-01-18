@@ -652,6 +652,12 @@ fn run_shell_command(
         command.env("LAMINAR_ADDRS", addr_list.join(" "));
         command.env("LAMINAR_GATEWAYS", gw_list.join(" "));
     }
+    if let Some(mac) = &config.mac_address {
+        command.env("LAMINAR_MAC", mac);
+    }
+    if let Some(dns) = &config.dns {
+        command.env("LAMINAR_DNS", dns.join(" "));
+    }
 
     let status = command.status()?;
 
