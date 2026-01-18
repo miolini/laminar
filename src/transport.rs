@@ -1,16 +1,28 @@
-use quinn::{Connection, Endpoint};
-// use std::io;
 use base64::prelude::*;
+use quinn::{Connection, Endpoint};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing::warn;
+use x509_parser::prelude::*;
 
 pub struct Transport {
     pub endpoint: Endpoint,
 }
 
 impl Transport {
-    pub fn new(config: &crate::config::NodeConfig) -> anyhow::Result<Self> {
-        let server_config = configure_server(config)?;
+    pub fn new(config: &crate::config::NodeConfig, peer_keys: Vec<String>) -> anyhow::Result<Self> {
+        let mut pinned_keys = HashSet::new();
+        for key_b64 in peer_keys {
+            if let Ok(der) = BASE64_STANDARD.decode(key_b64.trim()) {
+                pinned_keys.insert(der);
+            }
+        }
+        let verifier = Arc::new(PeerVerifier { pinned_keys });
+        let server_config = configure_server(config, verifier.clone())?;
 
         // Manual socket creation for dual-stack support
         let addr = config.listen;
@@ -56,8 +68,20 @@ impl Transport {
 
         Ok(Self { endpoint })
     }
-    pub async fn connect(&self, addr: SocketAddr, server_name: &str) -> anyhow::Result<Connection> {
-        let client_cfg = configure_client();
+    pub async fn connect(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+        peer_keys: Vec<String>,
+    ) -> anyhow::Result<Connection> {
+        let mut pinned_keys = HashSet::new();
+        for key_b64 in peer_keys {
+            if let Ok(der) = BASE64_STANDARD.decode(key_b64.trim()) {
+                pinned_keys.insert(der);
+            }
+        }
+        let verifier = Arc::new(PeerVerifier { pinned_keys });
+        let client_cfg = configure_client(verifier);
         // connect_with takes ClientConfig directly? No, Endpoint is configured or we use connect_with
         let connection = self
             .endpoint
@@ -67,10 +91,21 @@ impl Transport {
     }
 }
 
-fn configure_server(config: &crate::config::NodeConfig) -> anyhow::Result<quinn::ServerConfig> {
+fn configure_server(
+    config: &crate::config::NodeConfig,
+    verifier: Arc<PeerVerifier>,
+) -> anyhow::Result<quinn::ServerConfig> {
     let (cert_chain, key) = load_identity(&config.private_key)?;
 
-    let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key)?;
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(cert_chain, key)?;
+
+    server_crypto.alpn_protocols = vec![b"laminar".to_vec()];
+
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?,
+    ));
 
     // Enable datagrams
     let mut transport_config = quinn::TransportConfig::default();
@@ -109,15 +144,13 @@ fn load_identity(
     Ok((cert_chain, priv_key))
 }
 
-fn configure_client() -> quinn::ClientConfig {
+fn configure_client(verifier: Arc<PeerVerifier>) -> quinn::ClientConfig {
     let mut crypto = rustls::ClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
 
-    // Skip verification for dev (for now, eventually replace with pinning)
-    crypto
-        .dangerous()
-        .set_certificate_verifier(Arc::new(SkipServerVerification));
+    crypto.dangerous().set_certificate_verifier(verifier);
+    crypto.alpn_protocols = vec![b"laminar".to_vec()];
 
     // Fix: Wrap into QuicClientConfig
     // QuicClientConfig needs to be created from rustls::ClientConfig
@@ -134,43 +167,101 @@ fn configure_client() -> quinn::ClientConfig {
 }
 
 #[derive(Debug)]
-struct SkipServerVerification;
+struct PeerVerifier {
+    pinned_keys: HashSet<Vec<u8>>,
+}
 
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+impl PeerVerifier {
+    fn verify_pin(&self, cert_der: &CertificateDer<'_>) -> Result<(), rustls::Error> {
+        let (_, cert) = X509Certificate::from_der(cert_der).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+
+        // Extract SPKI (Subject Public Key Info)
+        let spki = cert.tbs_certificate.subject_pki.raw;
+
+        // We compare the raw SPKI bytes with our pinned keys
+        if self.pinned_keys.iter().any(|pinned| pinned == spki) {
+            Ok(())
+        } else {
+            warn!("Certificate pinning failed! Unknown public key.");
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+}
+
+impl ServerCertVerifier for PeerVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.verify_pin(end_entity)
+            .map(|_| ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _cert: &CertificateDer<'_>,
         _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _cert: &CertificateDer<'_>,
         _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ED25519,
-        ]
+        vec![rustls::SignatureScheme::ED25519]
+    }
+}
+
+impl ClientCertVerifier for PeerVerifier {
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.verify_pin(end_entity)
+            .map(|_| ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![rustls::SignatureScheme::ED25519]
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
     }
 }

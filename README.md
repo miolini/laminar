@@ -25,7 +25,7 @@ It leverages **QUIC Datagrams** to provide a strictly unreliable transport layer
 - **⚡ Traffic Sieve**: Intelligent packet classification that routes interactive traffic (VoIP, SSH) via the lowest latency link and bulk traffic via the highest bandwidth pipes.
 - **🛡️ Custom Fragmentation**: Handles MTUs larger than the underlying path (e.g., 9000-byte jumbo frames) with a TTL-based garbage collector to prevent memory leaks.
 - **🚀 Parallel Dialing**: Connects to all multi-path endpoints in parallel for near-instant initialization.
-- **🔒 Security**: End-to-end encryption using **TLS 1.3** and safe QUIC handshakes.
+- **🔒 Strong Security**: Mutual TLS 1.3 with mandatory Public Key Pinning (Strong PFS) for all mesh connections.
 - **📊 Observability**: Built-in interactive **TUI** and local **REST API** with real-time RTT/CWND monitoring.
 
 ## 🏗️ Architecture
@@ -102,7 +102,14 @@ The scheduler maintains a real-time table of RTT and congestion windows for each
 - **Congestion Control**: We leverage QUIC's internal BBR/Cubic to manage the available bandwidth per link.
 - **Aggregation**: The "Water-Filling" algorithm fills the primary link's window first, then spills excess traffic into secondary links. This avoids the "slowest link bottleneck" common in simple round-robin VPNs.
 
-### 4. macOS L3 Fallback (Fake L2)
+### 4. Strong Security & PFS
+Laminar implements the "Strong PFS" model by default:
+- **TLS 1.3 Only**: No legacy protocols allowed.
+- **Mutual TLS (mTLS)**: Both client and server verify each other's certificates.
+- **Public Key Pinning**: Each connection is pinned to the specific base64 public key configured for the peer. Any MitM attempt with a different key results in immediate connection termination.
+- **PFS**: Ephemeral Diffie-Hellman keys ensure that past traffic remains secure even if long-term keys are compromised.
+
+### 5. macOS L3 Fallback (Fake L2)
 Standard macOS does not support TAP (Layer 2) devices without third-party kernel extensions. To ensure out-of-the-box compatibility, Laminar implements a **Fake L2** emulation:
 - **Ingress**: Reads IP packets from a `utun` interface.
 - **Transformation**: Prepends a synthetic Ethernet header (dst/src MACs and EthType) so the Sieve can process them as standard L2 frames.

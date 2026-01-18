@@ -96,12 +96,19 @@ fn generate_keys(_key_path: &str) -> anyhow::Result<()> {
     let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ED25519)
         .map_err(|e| anyhow::anyhow!("Failed to generate key: {}", e))?;
 
-    let der = key_pair.serialize_der();
-    let b64 = BASE64_STANDARD.encode(&der);
+    let priv_der = key_pair.serialize_der();
+    let priv_b64 = BASE64_STANDARD.encode(&priv_der);
 
-    println!("Laminar Private Key (Base64):");
-    println!("{}", b64);
-    println!("\nCopy this string into your config.toml or NixOS configuration.");
+    let pub_der = key_pair.public_key_der();
+    let pub_b64 = BASE64_STANDARD.encode(&pub_der);
+
+    println!("--- Laminar Key Generation ---");
+    println!("Private Key (Keep Secret!):");
+    println!("{}", priv_b64);
+    println!("\nPublic Key (Share with Peers):");
+    println!("{}", pub_b64);
+    println!("\nCopy the Private Key into your [node] config.");
+    println!("Share the Public Key with peers for pinning.");
 
     Ok(())
 }
@@ -267,7 +274,8 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     }
 
     // 3. Setup Transport
-    let transport = Arc::new(Transport::new(&config.node)?);
+    let peer_public_keys: Vec<String> = config.peers.iter().map(|p| p.public_key.clone()).collect();
+    let transport = Arc::new(Transport::new(&config.node, peer_public_keys.clone())?);
     let endpoint = transport.endpoint.clone();
 
     // 4. Mesh State (Central Sieve for all peers)
@@ -288,6 +296,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     for peer_cfg in config.peers {
         let sieve_clone = sieve.clone();
         let node_streams = config.node.streams;
+        let peer_pub_key = peer_cfg.public_key.clone();
         let peer_name = peer_cfg.name.clone();
         let endpoints = peer_cfg.endpoints.clone();
         let transport_clone = transport.clone();
@@ -296,9 +305,10 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
             let s_inner = sieve_clone.clone();
             let t_inner = transport_clone.clone();
             let p_name = peer_name.clone();
+            let p_key = vec![peer_pub_key.clone()];
 
             tokio::spawn(async move {
-                match t_inner.connect(peer_addr, "localhost").await {
+                match t_inner.connect(peer_addr, "localhost", p_key).await {
                     Ok(conn) => {
                         info!("Connected to peer {} at {}", p_name, peer_addr);
 
