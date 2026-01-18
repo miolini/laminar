@@ -32,3 +32,14 @@ reqwest = { version = "0.13.1", features = ["json"] }
 base64 = "0.22"
 x509-parser = "0.16"
 
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Enable Link Time Optimization
+codegen-units = 1    # Reduce number of codegen units to increase optimizations
+panic = "abort"      # Abort on panic to reduce binary size
+strip = true         # Strip symbols from binary
+
+[profile.dev]
+opt-level = 1        # Basic optimizations for dev
+strip = true         # Strip symbols even in dev to show size reduction
