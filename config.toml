@@ -26,8 +26,14 @@ dhcp = true
 dns = ["8.8.8.8", "1.1.1.1"]
 
 # Lifecycle Hooks
-up_script = "ip link set dev laminar0 up && ip addr add 10.100.0.1/24 dev laminar0"
-down_script = "echo 'Shutting down Laminar...'"
+up_script = """
+if [ "$(uname)" = "Darwin" ]; then
+    ifconfig $LAMINAR_IFACE 10.100.0.1 10.100.0.1 netmask 255.255.255.0 up
+else
+    ip link set dev $LAMINAR_IFACE up && ip addr add 10.100.0.1/24 dev $LAMINAR_IFACE
+fi
+"""
+down_script = "echo 'Shutting down $LAMINAR_IFACE'"
 
 [[peers]]
 name = "site-b"

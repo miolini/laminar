@@ -165,6 +165,54 @@ Target API: `http://127.0.0.1:3000/state`.
 - [ ] Dynamic Peer Discovery (DHT)
 - [ ] NAT Traversal / Hole Punching
 
+## ❄️ NixOS Integration
+
+Laminar is designed to be a first-class citizen on NixOS.
+
+### 1. Flake Integration
+Add to your `flake.nix`:
+
+```nix
+{
+  inputs.laminar.url = "github:miolini/laminar";
+
+  outputs = { self, nixpkgs, laminar, ... }: {
+    nixosConfigurations.my-router = nixpkgs.lib.nixosSystem {
+      modules = [
+        laminar.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+### 2. Service Configuration (`configuration.nix`)
+
+```nix
+{ config, pkgs, ... }: {
+  services.laminar = {
+    enable = true;
+    listenAddress = "[::]";
+    listenPort = 9000;
+    
+    # Path to secret key (should be deployed via sops-nix or agenix)
+    privateKeyFile = "/run/secrets/laminar/key.pem";
+    
+    # Peer Configuration
+    peers = {
+      "site-b" = {
+        publicKey = "...";
+        endpoints = [ "192.168.1.5:9000" ];
+      };
+    };
+    
+    # Auto-open firewall
+    openFirewall = true;
+  };
+}
+```
+
 ## 📜 License
 
 MIT License. See `LICENSE` for details.

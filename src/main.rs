@@ -161,10 +161,16 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         info!("Setting MAC address to {}", mac);
 
         #[cfg(target_os = "linux")]
-        run_shell_command(&format!("ip link set dev {} address {}", tap_name, mac))?;
+        run_shell_command(
+            &format!("ip link set dev {} address {}", tap_name, mac),
+            Some(&tap_name),
+        )?;
 
         #[cfg(target_os = "macos")]
-        if let Err(e) = run_shell_command(&format!("ifconfig {} ether {}", tap_name, mac)) {
+        if let Err(e) = run_shell_command(
+            &format!("ifconfig {} ether {}", tap_name, mac),
+            Some(&tap_name),
+        ) {
             warn!(
                 "Failed to set MAC on {}: {} (Note: macOS utun devices might not support custom MACs)",
                 tap_name, e
@@ -180,16 +186,25 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
             // Create bridge if not exists (ignore error)
-            let _ = run_shell_command(&format!("ip link add name {} type bridge", br_name));
+            let _ = run_shell_command(
+                &format!("ip link add name {} type bridge", br_name),
+                Some(&tap_name),
+            );
             // Set up
-            run_shell_command(&format!("ip link set dev {} up", br_name))?;
+            run_shell_command(&format!("ip link set dev {} up", br_name), Some(&tap_name))?;
             // Add TAP
-            run_shell_command(&format!("ip link set dev {} master {}", tap_name, br_name))?;
+            run_shell_command(
+                &format!("ip link set dev {} master {}", tap_name, br_name),
+                Some(&tap_name),
+            )?;
 
             if let Some(ext) = &bridge_cfg.external_interface {
                 // Warning: This often removes IP from physical interface.
                 // User is expected to handle IP re-assignment via up_script or external config.
-                run_shell_command(&format!("ip link set dev {} master {}", ext, br_name))?;
+                run_shell_command(
+                    &format!("ip link set dev {} master {}", ext, br_name),
+                    Some(&tap_name),
+                )?;
             }
         }
 
@@ -197,23 +212,29 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         {
             // Try create (ignore error if exists)
             // Note: macOS bridges are usually bridge0, bridge1. User should probably use "bridge0".
-            let _ = run_shell_command(&format!("ifconfig {} create", br_name));
+            let _ = run_shell_command(&format!("ifconfig {} create", br_name), Some(&tap_name));
 
             // Add TAP
-            run_shell_command(&format!("ifconfig {} addm {}", br_name, tap_name))?;
+            run_shell_command(
+                &format!("ifconfig {} addm {}", br_name, tap_name),
+                Some(&tap_name),
+            )?;
 
             if let Some(ext) = &bridge_cfg.external_interface {
-                run_shell_command(&format!("ifconfig {} addm {}", br_name, ext))?;
+                run_shell_command(
+                    &format!("ifconfig {} addm {}", br_name, ext),
+                    Some(&tap_name),
+                )?;
             }
             // Up
-            run_shell_command(&format!("ifconfig {} up", br_name))?;
+            run_shell_command(&format!("ifconfig {} up", br_name), Some(&tap_name))?;
         }
     }
 
     // Execute Up Script
     if let Some(cmd) = &config.node.up_script {
         info!("Running up script: {}", cmd);
-        run_shell_command(cmd)?;
+        run_shell_command(cmd, Some(&tap_name))?;
     }
 
     // 3. Setup Transport
@@ -439,7 +460,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     // Execute Down Script
     if let Some(cmd) = &config.node.down_script {
         info!("Running down script: {}", cmd);
-        let _ = run_shell_command(cmd); // Ignore error on shutdown?
+        let _ = run_shell_command(cmd, Some(&tap_name)); // Ignore error on shutdown?
     }
 
     Ok(())
@@ -537,11 +558,13 @@ async fn get_state(
     axum::Json(s.clone())
 }
 
-fn run_shell_command(cmd: &str) -> anyhow::Result<()> {
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .status()?;
+fn run_shell_command(cmd: &str, iface: Option<&str>) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(cmd);
+    if let Some(i) = iface {
+        command.env("LAMINAR_IFACE", i);
+    }
+    let status = command.status()?;
 
     if !status.success() {
         return Err(anyhow::anyhow!("Command failed with status: {}", status));
