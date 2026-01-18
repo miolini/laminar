@@ -170,7 +170,7 @@ mac_address = "02:00:00:00:00:01"
 dhcp = false
 addresses = [
     { address = "10.100.0.1/24", gateway = "10.100.0.254" },
-    { address = "fd00:laminar::1/64", gateway = "fd00:laminar::ff" }
+    { address = "fd00::1/64", gateway = "fd00::ff" }
 ]
 
 # TLS Identity (Base64 encoded DER)
@@ -298,7 +298,7 @@ Add the Laminar repository to your `flake.nix` inputs:
     dhcp = false;
     addresses = [
       { address = "10.100.0.1/24"; gateway = "10.100.0.254"; }
-      { address = "fd00:laminar::1/64"; gateway = "fd00:laminar::ff"; }
+      { address = "fd00::1/64"; gateway = "fd00::ff"; }
     ];
 
     # L2 Bridging (Optional)
