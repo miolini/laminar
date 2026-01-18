@@ -277,23 +277,36 @@ Add to your `flake.nix`:
     enable = true;
     listen = "[::]:9000";
     
-    # Secret key base64 string
+    # Secret key base64 string (DER format)
     privateKey = "MC4CAQAwBQYDK2VwBCIEIP...";
     
     # Static Network Configuration (optional, defaults to DHCP)
     dhcp = false;
     ipv4Address = "10.100.0.1";
     ipv4Mask = "255.255.255.0";
+    ipv4Gateway = "10.100.0.254";
+
+    # L2 Bridging (Optional)
+    # bridge = {
+    #   name = "br0";
+    #   external_interface = "eth1";
+    # };
+
+    # Custom Setup Hook (Optional)
+    upScript = ''
+      # Using config variables passed via environment
+      ip addr add 10.200.0.1/24 dev $LAMINAR_IFACE || true
+    '';
 
     # Peer Configuration
     peers = {
       "site-b" = {
         publicKey = "...";
-        endpoints = [ "192.168.1.5:9000" ];
+        endpoints = [ "1.2.3.4:9000" "[2001:db8::1]:9000" ];
       };
     };
     
-    # Auto-open firewall
+    # Dynamic Firewall Management
     openFirewall = true;
   };
 }
