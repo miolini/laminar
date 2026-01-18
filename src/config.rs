@@ -21,6 +21,8 @@ pub struct NodeConfig {
     pub ipv4_address: Option<String>,
     pub ipv4_mask: Option<String>,
     pub ipv4_gateway: Option<String>,
+    pub ipv6_address: Option<String>,
+    pub ipv6_gateway: Option<String>,
     pub dns: Option<Vec<String>>,
     // Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
     pub streams: Option<usize>,

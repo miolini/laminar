@@ -293,11 +293,14 @@ Add the Laminar repository to your `flake.nix` inputs:
     # Secret key base64 string (DER format)
     privateKey = "MC4CAQAwBQYDK2VwBCIEIP...";
     
-    # Static Network Configuration (optional, defaults to DHCP)
+    # Dual-Stack Network Configuration (optional, defaults to DHCP)
     dhcp = false;
     ipv4Address = "10.100.0.1";
     ipv4Mask = "255.255.255.0";
     ipv4Gateway = "10.100.0.254";
+    
+    ipv6Address = "fd00:laminar::1/64";
+    ipv6Gateway = "fd00:laminar::ff";
 
     # L2 Bridging (Optional)
     # bridge = {

@@ -652,6 +652,12 @@ fn run_shell_command(
     if let Some(gw) = &config.ipv4_gateway {
         command.env("LAMINAR_GW", gw);
     }
+    if let Some(ip6) = &config.ipv6_address {
+        command.env("LAMINAR_IPV6", ip6);
+    }
+    if let Some(gw6) = &config.ipv6_gateway {
+        command.env("LAMINAR_GW6", gw6);
+    }
 
     let status = command.status()?;
 
