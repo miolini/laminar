@@ -45,6 +45,44 @@ Laminar implements a sophisticated scheduling algorithm:
 *   **Sticky**: Hashes the 5-tuple (IP/Port) to ensure a single flow stays on one link. Best for minimizing jitter/reordering.
 *   **Random**: Purely random distribution. High entropy.
 
+## 🛠️ Technical Deep Dive
+
+### 1. The "Sieve" Architecture
+Laminar's data plane is built around a concept called the **Sieve**. Instead of a traditional bridge that blindly forwards packets, the Sieve treats the virtual interface as a classification and transformation engine.
+
+- **Classifier**: Every frame is inspected. Small packets (MTU < 150 bytes) or those with interactive signatures (TCP SYN/ACK, SSH, ARP) are prioritized for the lowest-latency link.
+- **Fragmenter**: If an L2 frame exceeds the Path MTU (PMTU) of the underlying QUIC transport, it is sliced into `LaminarChunks`.
+
+### 2. Custom Fragmentation Protocol (`LaminarFrag`)
+Laminar does **not** rely on IP fragmentation. It implements a lightweight, overhead-optimized fragmentation header inside each QUIC Datagram:
+
+```rust
+#[repr(packed)]
+struct LaminarHeader {
+    frame_id: u64,     // Monotonic ID per original L2 frame
+    total_frags: u8,   // Count of chunks
+    frag_index: u8,    // Current chunk position
+    flags: u8,         // Type (Ethernet, OAM, Keepalive)
+}
+```
+
+This allows Laminar to support **Jumbo Frames** (up to 64KB) over standard 1500-byte internet links with zero-copy reassembly.
+
+### 3. Multi-path QUIC Datagrams
+Laminar spawns **one QUIC Endpoint per physical interface**.
+- Interface `eth0` -> Connection A
+- Interface `wlan0` -> Connection B
+
+The scheduler maintains a real-time table of RTT and congestion windows for each connection. When a frame arrives, the "Water-Filling" algorithm fills the primary link's window first, then spills excess traffic into secondary links.
+
+### 4. macOS L3 Fallback (Fake L2)
+Standard macOS does not support TAP (Layer 2) devices without third-party kernel extensions. To ensure out-of-the-box compatibility, Laminar implements a **Fake L2** emulation:
+- **Ingress**: Reads IP packets from a `utun` interface.
+- **Transformation**: Prepends a synthetic Ethernet header (dst/src MACs and EthType) so the Sieve can process them as standard L2 frames.
+- **Egress**: Strips the Ethernet header before injecting the IP payload back into the kernel.
+
+This allows Laminar to function as a high-performance VPN on macOS while maintaining full L2 capabilities on Linux/NixOS.
+
 ## 🚀 Installation
 
 ### Prerequisites
