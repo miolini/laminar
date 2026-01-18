@@ -151,7 +151,7 @@
 
             privateKey = lib.mkOption {
               type = lib.types.str;
-              description = "The private key PEM content for the node.";
+              description = "The private key in base64 format for the node.";
             };
 
             streams = lib.mkOption {

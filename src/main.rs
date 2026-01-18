@@ -4,6 +4,7 @@ use crate::protocol::Reassembler;
 use crate::sieve::{Link, Sieve};
 use crate::state::{NodeState, PeerState, SharedState};
 use crate::transport::Transport;
+use base64::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +20,6 @@ mod state;
 mod transport; // New module
 
 use clap::{Parser, Subcommand};
-use rcgen::generate_simple_self_signed;
 
 // TUI Imports
 use crossterm::{
@@ -91,12 +91,18 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn generate_keys(key_path: &str) -> anyhow::Result<()> {
-    let cert = generate_simple_self_signed(vec!["localhost".to_string()])?;
+fn generate_keys(_key_path: &str) -> anyhow::Result<()> {
+    // Generate a new Ed25519 key pair
+    let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ED25519)
+        .map_err(|e| anyhow::anyhow!("Failed to generate key: {}", e))?;
 
-    std::fs::write(key_path, cert.serialize_private_key_pem())?;
+    let der = key_pair.serialize_der();
+    let b64 = BASE64_STANDARD.encode(&der);
 
-    info!("Generated private key at '{}'", key_path);
+    println!("Laminar Private Key (Base64):");
+    println!("{}", b64);
+    println!("\nCopy this string into your config.toml or NixOS configuration.");
+
     Ok(())
 }
 

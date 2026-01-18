@@ -165,12 +165,8 @@ ipv4_address = "10.100.0.1"
 ipv4_mask = "255.255.255.0"
 ipv4_gateway = "10.100.0.254"
 
-# TLS Identity
-private_key = """
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEI... (your private key here)
------END PRIVATE KEY-----
-"""
+# TLS Identity (Base64 encoded DER)
+private_key = "MC4CAQAwBQYDK2VwBCIEIP..."
 
 # Bonding Configuration
 # "water_filling" | "random" | "sticky"
@@ -281,12 +277,8 @@ Add to your `flake.nix`:
     enable = true;
     listen = "[::]:9000";
     
-    # Secret key PEM string
-    privateKey = ''
-      -----BEGIN PRIVATE KEY-----
-      ...
-      -----END PRIVATE KEY-----
-    '';
+    # Secret key base64 string
+    privateKey = "MC4CAQAwBQYDK2VwBCIEIP...";
     
     # Static Network Configuration (optional, defaults to DHCP)
     dhcp = false;

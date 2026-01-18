@@ -1,5 +1,6 @@
 use quinn::{Connection, Endpoint};
 // use std::io;
+use base64::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -82,13 +83,17 @@ fn configure_server(config: &crate::config::NodeConfig) -> anyhow::Result<quinn:
 }
 
 fn load_identity(
-    pem_content: &str,
+    base64_content: &str,
 ) -> anyhow::Result<(
     Vec<rustls::pki_types::CertificateDer<'static>>,
     rustls::pki_types::PrivateKeyDer<'static>,
 )> {
-    let key_pair = rcgen::KeyPair::from_pem(pem_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse key: {}", e))?;
+    let der = BASE64_STANDARD
+        .decode(base64_content.trim())
+        .map_err(|e| anyhow::anyhow!("Failed to decode base64 key: {}", e))?;
+
+    let key_pair = rcgen::KeyPair::from_der(&der)
+        .map_err(|e| anyhow::anyhow!("Failed to parse DER key: {}", e))?;
 
     let subject_alt_names = vec!["localhost".to_string(), "laminar-node".to_string()];
     let mut params = rcgen::CertificateParams::new(subject_alt_names);

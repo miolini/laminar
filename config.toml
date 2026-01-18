@@ -5,12 +5,8 @@ listen = "[::]:9000"
 mtu = 1420
 # Name of the interface to create
 # tap_name = "laminar0"
-# TLS Identity Private Key (PEM format)
-private_key = """
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEI... (your private key here)
------END PRIVATE KEY-----
-"""
+# TLS Identity Private Key (Base64 encoded DER)
+private_key = "MC4CAQAwBQYDK2VwBCIEIP..."
 
 # Scaling: Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
 streams = 4 
