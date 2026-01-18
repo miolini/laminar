@@ -1,0 +1,37 @@
+[node]
+# Dual Stack (sends/receives both IPv4 and IPv6)
+listen = "[::]:9000"
+# Virtual MTU of the TAP interface
+mtu = 1420
+# Name of the interface to create
+# tap_name = "laminar0"
+# Path to TLS credentials
+private_key = "key.pem"
+
+# Scaling: Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
+streams = 4 
+
+# Load Balancing Strategy: water_filling (default), random, sticky
+bonding_mode = "water_filling"
+
+# L2 Bridging Config (Optional)
+# Uncomment to enable bridging with a physical interface
+#[node.bridge]
+#name = "br0"
+#external_interface = "eth1"
+
+# Network Identity
+mac_address = "02:00:00:00:00:01"
+dhcp = true
+dns = ["8.8.8.8", "1.1.1.1"]
+
+# Lifecycle Hooks
+up_script = "ip link set dev laminar0 up && ip addr add 10.100.0.1/24 dev laminar0"
+down_script = "echo 'Shutting down Laminar...'"
+
+[[peers]]
+name = "site-b"
+# Base64 encoded public key of the peer (for future mutual auth)
+public_key = "..." 
+# List of physical endpoints for this peer to bond across. Can be mixed IPv4 and IPv6.
+endpoints = ["192.168.1.5:9000", "[2001:db8::1]:9000"]
