@@ -39,28 +39,42 @@ impl Classifier {
             let ip_header_len = (frame[14] & 0x0F) * 4;
             let protocol = frame[14 + 9];
 
-            // ICMP (1)
-            if protocol == 1 {
+            // ICMP (1), IGMP (2)
+            if protocol == 1 || protocol == 2 {
                 return TrafficClass::Interactive;
             }
 
             // TCP (6)
             if protocol == 6 {
-                // Check flags if we can
                 let tcp_offset = 14 + ip_header_len as usize;
                 if frame.len() > tcp_offset + 13 {
-                    // let flags = frame[tcp_offset + 13];
-                    // SYN(0x02), RST(0x04), ACK(0x10) without data?
-                    // Heuristic: Small TCP packets are likely control/interactive
-                    if frame.len() < 128 {
+                    // SYN(0x02), RST(0x04), FIN(0x01) or small packets
+                    let flags = frame[tcp_offset + 13];
+                    if (flags & 0x07) != 0 || frame.len() < 256 {
                         return TrafficClass::Interactive;
                     }
                 }
             }
         }
 
+        // IPv6 (0x86DD)
+        if eth_type == 0x86DD {
+            if frame.len() < 54 {
+                return TrafficClass::Interactive;
+            }
+            let next_header = frame[14 + 6];
+            // ICMPv6 (58)
+            if next_header == 58 {
+                return TrafficClass::Interactive;
+            }
+            // Small packets
+            if frame.len() < 256 {
+                return TrafficClass::Interactive;
+            }
+        }
+
         // Default small packets to interactive
-        if frame.len() < 256 {
+        if frame.len() < 512 {
             return TrafficClass::Interactive;
         }
 
@@ -198,27 +212,27 @@ impl Sieve {
                 BondingMode::WaterFilling => {
                     for (i, frag) in fragments.into_iter().enumerate() {
                         let link_idx = i % links.len();
-                        Self::send_frag_on_link(&mut links[link_idx], frag);
+                        Self::send_frag_on_link(&mut links[link_idx], frag).await;
                     }
                 }
                 BondingMode::Random => {
                     let mut rng = rand::thread_rng();
                     for frag in fragments {
                         let random_idx = rng.gen_range(0..links.len());
-                        Self::send_frag_on_link(&mut links[random_idx], frag);
+                        Self::send_frag_on_link(&mut links[random_idx], frag).await;
                     }
                 }
                 BondingMode::Sticky => {
                     let idx = (frame_hash as usize) % links.len();
                     for frag in fragments {
-                        Self::send_frag_on_link(&mut links[idx], frag);
+                        Self::send_frag_on_link(&mut links[idx], frag).await;
                     }
                 }
             },
         }
     }
 
-    fn send_frag_on_link(link: &mut Link, frag: Bytes) {
+    async fn send_frag_on_link(link: &mut Link, frag: Bytes) {
         if !link.streams.is_empty() {
             let stream_idx = link.next_stream % link.streams.len();
             link.next_stream = link.next_stream.wrapping_add(1);
@@ -226,14 +240,15 @@ impl Sieve {
             let stream_mutex = &link.streams[stream_idx];
             let len = frag.len() as u16;
             let len_bytes = len.to_be_bytes();
-            let frag_clone = frag.clone();
-            let stream_clone = stream_mutex.clone();
 
-            tokio::spawn(async move {
-                let mut s = stream_clone.lock().await;
-                let _ = s.write_all(&len_bytes).await;
-                let _ = s.write_all(&frag_clone).await;
-            });
+            // CRITICAL FIX: Do NOT spawn task here.
+            // Interleaving multiple async write sequences on the same stream
+            // without a lock held across the entire sequence will corrupt the stream.
+            let mut s = stream_mutex.lock().await;
+            if s.write_all(&len_bytes).await.is_err() {
+                return;
+            }
+            let _ = s.write_all(&frag).await;
         } else {
             let _ = link.connection.send_datagram(frag);
         }
@@ -248,13 +263,25 @@ impl Sieve {
             // If IPv4 (0x0800 at 12)
             if frame[12] == 0x08 && frame[13] == 0x00 && frame.len() >= 34 {
                 // IPv4 Src(4)+Dst(4) at offset 26
-                // (14 + 12 = 26)
                 frame[26..34].hash(&mut hasher);
                 // Protocol at 14+9 = 23
-                frame[23].hash(&mut hasher);
+                let proto = frame[23];
+                proto.hash(&mut hasher);
                 // Ports: TCP/UDP usually at IP headers (20 bytes) -> 14+20 = 34
-                if (frame[23] == 6 || frame[23] == 17) && frame.len() >= 38 {
+                if (proto == 6 || proto == 17) && frame.len() >= 38 {
                     frame[34..38].hash(&mut hasher);
+                }
+            }
+            // If IPv6 (0x86DD at 12)
+            else if frame[12] == 0x86 && frame[13] == 0xDD && frame.len() >= 54 {
+                // IPv6 Src(16)+Dst(16) at offset 14+8 = 22
+                frame[22..54].hash(&mut hasher);
+                // Next Header at 14+6 = 20
+                let proto = frame[20];
+                proto.hash(&mut hasher);
+                // Ports: TCP/UDP usually after fixed 40-byte header -> 14+40 = 54
+                if (proto == 6 || proto == 17) && frame.len() >= 58 {
+                    frame[54..58].hash(&mut hasher);
                 }
             }
         } else {

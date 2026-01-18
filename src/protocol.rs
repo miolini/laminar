@@ -145,6 +145,7 @@ pub struct Reassembler {
     // For simplicity, we'll just use a BTreeMap and maybe clear it periodically or on limits.
     // Real implementation needs robust windowing/GC.
     partial_frames: BTreeMap<u64, PartialFrame>,
+    last_cleanup: Instant,
 }
 
 use std::time::Instant;
@@ -160,6 +161,7 @@ impl Reassembler {
     pub fn new() -> Self {
         Self {
             partial_frames: BTreeMap::new(),
+            last_cleanup: Instant::now(),
         }
     }
 
@@ -216,8 +218,11 @@ impl Reassembler {
             return Ok(Some(full_frame.freeze()));
         }
 
-        // Cleanup old/stale frames
-        self.cleanup();
+        // Cleanup periodically (every 500ms)
+        if self.last_cleanup.elapsed() > std::time::Duration::from_millis(500) {
+            self.cleanup();
+            self.last_cleanup = Instant::now();
+        }
 
         Ok(None)
     }
@@ -230,10 +235,12 @@ impl Reassembler {
         self.partial_frames
             .retain(|_, frame| now.duration_since(frame.created_at) < timeout);
 
-        if self.partial_frames.len() > 1000 {
-            // Hard limit to prevent memory bloat if retention is too slow
+        // Limit memory exposure: if we have more than 4096 partial frames, drop oldest.
+        while self.partial_frames.len() > 4096 {
             if let Some(&first_key) = self.partial_frames.keys().next() {
                 self.partial_frames.remove(&first_key);
+            } else {
+                break;
             }
         }
     }

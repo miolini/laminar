@@ -87,11 +87,21 @@ impl InterfaceReader {
                 return Ok(0);
             }
 
-            // Packet is at buf[start_len..start_len+n].
-            // To fake L2, we need to inspect IP header at buf[start_len].
-            // IPv4: version=4 (0x4X). IPv6: version=6 (0x6X).
+            if n < 20 {
+                // Minimum IPv4 header
+                buf.truncate(start_len);
+                return Ok(0);
+            }
+
             let first_byte = buf[start_len];
             let ip_ver = first_byte >> 4;
+
+            if ip_ver != 4 && ip_ver != 6 {
+                // Not IP, drop to maintain stream sanity
+                buf.truncate(start_len);
+                return Ok(0);
+            }
+
             let eth_type: u16 = if ip_ver == 6 { 0x86DD } else { 0x0800 };
 
             // We need to insert 14 bytes (Eth Header) at start_len.
