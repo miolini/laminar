@@ -109,11 +109,10 @@
               dns = cfg.dns;
               up_script = cfg.upScript;
               down_script = cfg.downScript;
-              ipv4_address = cfg.ipv4Address;
-              ipv4_mask = cfg.ipv4Mask;
-              ipv4_gateway = cfg.ipv4Gateway;
-              ipv6_address = cfg.ipv6Address;
-              ipv6_gateway = cfg.ipv6Gateway;
+              addresses = map (a: {
+                address = a.address;
+                gateway = if a.gateway != "" then a.gateway else null;
+              }) cfg.addresses;
             } // lib.optionalAttrs (cfg.tapName != null) {
               tap_name = cfg.tapName;
             } // lib.optionalAttrs (cfg.bridge != null) {
@@ -201,34 +200,22 @@
               default = null;
             };
             
-            ipv4Address = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Static IPv4 address to assign to the interface.";
-            };
-
-            ipv4Mask = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Static IPv4 mask to assign to the interface.";
-            };
-
-            ipv4Gateway = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Static IPv4 gateway to assign to the interface.";
-            };
-            
-            ipv6Address = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Static IPv6 address to assign to the interface (e.g. fd00::1/64).";
-            };
-
-            ipv6Gateway = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              description = "Static IPv6 gateway to assign to the interface.";
+            addresses = lib.mkOption {
+              type = lib.types.listOf (lib.types.submodule {
+                options = {
+                  address = lib.mkOption {
+                    type = lib.types.str;
+                    description = "IP address with CIDR mask.";
+                  };
+                  gateway = lib.mkOption {
+                    type = lib.types.str;
+                    default = "";
+                    description = "Optional gateway for this address.";
+                  };
+                };
+              });
+              default = [ ];
+              description = "List of IP addresses with optional gateways.";
             };
 
             peers = lib.mkOption {

@@ -643,20 +643,14 @@ fn run_shell_command(
     if let Some(i) = iface {
         command.env("LAMINAR_IFACE", i);
     }
-    if let Some(ip) = &config.ipv4_address {
-        command.env("LAMINAR_IP", ip);
-    }
-    if let Some(mask) = &config.ipv4_mask {
-        command.env("LAMINAR_MASK", mask);
-    }
-    if let Some(gw) = &config.ipv4_gateway {
-        command.env("LAMINAR_GW", gw);
-    }
-    if let Some(ip6) = &config.ipv6_address {
-        command.env("LAMINAR_IPV6", ip6);
-    }
-    if let Some(gw6) = &config.ipv6_gateway {
-        command.env("LAMINAR_GW6", gw6);
+    if let Some(addrs) = &config.addresses {
+        let addr_list: Vec<String> = addrs.iter().map(|a| a.address.clone()).collect();
+        let gw_list: Vec<String> = addrs
+            .iter()
+            .map(|a| a.gateway.clone().unwrap_or_default())
+            .collect();
+        command.env("LAMINAR_ADDRS", addr_list.join(" "));
+        command.env("LAMINAR_GATEWAYS", gw_list.join(" "));
     }
 
     let status = command.status()?;

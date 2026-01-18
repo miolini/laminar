@@ -168,9 +168,10 @@ tap_name = "laminar0"
 mtu = 1420
 mac_address = "02:00:00:00:00:01"
 dhcp = false
-ipv4_address = "10.100.0.1"
-ipv4_mask = "255.255.255.0"
-ipv4_gateway = "10.100.0.254"
+addresses = [
+    { address = "10.100.0.1/24", gateway = "10.100.0.254" },
+    { address = "fd00:laminar::1/64", gateway = "fd00:laminar::ff" }
+]
 
 # TLS Identity (Base64 encoded DER)
 private_key = "MC4CAQAwBQYDK2VwBCIEIP..."
@@ -295,12 +296,10 @@ Add the Laminar repository to your `flake.nix` inputs:
     
     # Dual-Stack Network Configuration (optional, defaults to DHCP)
     dhcp = false;
-    ipv4Address = "10.100.0.1";
-    ipv4Mask = "255.255.255.0";
-    ipv4Gateway = "10.100.0.254";
-    
-    ipv6Address = "fd00:laminar::1/64";
-    ipv6Gateway = "fd00:laminar::ff";
+    addresses = [
+      { address = "10.100.0.1/24"; gateway = "10.100.0.254"; }
+      { address = "fd00:laminar::1/64"; gateway = "fd00:laminar::ff"; }
+    ];
 
     # L2 Bridging (Optional)
     # bridge = {

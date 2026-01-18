@@ -8,6 +8,12 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct AddressConfig {
+    pub address: String,
+    pub gateway: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct NodeConfig {
     pub listen: SocketAddr,
@@ -18,11 +24,7 @@ pub struct NodeConfig {
     pub down_script: Option<String>,
     pub mac_address: Option<String>,
     pub dhcp: Option<bool>,
-    pub ipv4_address: Option<String>,
-    pub ipv4_mask: Option<String>,
-    pub ipv4_gateway: Option<String>,
-    pub ipv6_address: Option<String>,
-    pub ipv6_gateway: Option<String>,
+    pub addresses: Option<Vec<AddressConfig>>,
     pub dns: Option<Vec<String>>,
     // Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
     pub streams: Option<usize>,
@@ -86,6 +88,9 @@ mod tests {
             private_key = "key.pem"
             mac_address = "02:00:00:00:00:01"
             dhcp = true
+            addresses = [
+                { address = "127.0.0.1/24", gateway = "127.0.0.1" }
+            ]
             dns = ["8.8.8.8"]
 
             [[peers]]
@@ -99,6 +104,17 @@ mod tests {
         assert_eq!(cfg.node.private_key, "key.pem");
         assert_eq!(cfg.node.mac_address.unwrap(), "02:00:00:00:00:01");
         assert!(cfg.node.dhcp.unwrap());
+        assert_eq!(
+            cfg.node.addresses.as_ref().unwrap()[0].address,
+            "127.0.0.1/24"
+        );
+        assert_eq!(
+            cfg.node.addresses.as_ref().unwrap()[0]
+                .gateway
+                .as_ref()
+                .unwrap(),
+            "127.0.0.1"
+        );
         assert_eq!(cfg.peers.len(), 1);
         assert_eq!(cfg.peers[0].endpoints.len(), 2);
     }
