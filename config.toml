@@ -22,15 +22,23 @@ bonding_mode = "water_filling"
 
 # Network Identity
 mac_address = "02:00:00:00:00:01"
-dhcp = true
+dhcp = false
+ipv4_address = "10.100.0.1"
+ipv4_mask = "255.255.255.0"
+ipv4_gateway = "10.100.0.254"
 dns = ["8.8.8.8", "1.1.1.1"]
 
 # Lifecycle Hooks
 up_script = """
 if [ "$(uname)" = "Darwin" ]; then
-    ifconfig $LAMINAR_IFACE 10.100.0.1 10.100.0.1 netmask 255.255.255.0 up
+    # Use config variables if set, otherwise fallback
+    IP=${LAMINAR_IP:-10.100.0.1}
+    MASK=${LAMINAR_MASK:-255.255.255.0}
+    ifconfig $LAMINAR_IFACE $IP $IP netmask $MASK up
 else
-    ip link set dev $LAMINAR_IFACE up && ip addr add 10.100.0.1/24 dev $LAMINAR_IFACE
+    IP=${LAMINAR_IP:-10.100.0.1}
+    MASK=${LAMINAR_MASK:-24}
+    ip link set dev $LAMINAR_IFACE up && ip addr add $IP/$MASK dev $LAMINAR_IFACE
 fi
 """
 down_script = "echo 'Shutting down $LAMINAR_IFACE'"

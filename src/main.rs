@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::interface::Interface;
 use crate::protocol::Reassembler;
 use crate::sieve::{Link, Sieve};
-use crate::state::{LinkStatsSnapshot, NodeState, PeerState, SharedState};
+use crate::state::{NodeState, PeerState, SharedState};
 use crate::transport::Transport;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -168,12 +168,14 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         run_shell_command(
             &format!("ip link set dev {} address {}", tap_name, mac),
             Some(&tap_name),
+            &config.node,
         )?;
 
         #[cfg(target_os = "macos")]
         if let Err(e) = run_shell_command(
             &format!("ifconfig {} ether {}", tap_name, mac),
             Some(&tap_name),
+            &config.node,
         ) {
             warn!(
                 "Failed to set MAC on {}: {} (Note: macOS utun devices might not support custom MACs)",
@@ -193,13 +195,19 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
             let _ = run_shell_command(
                 &format!("ip link add name {} type bridge", br_name),
                 Some(&tap_name),
+                &config.node,
             );
             // Set up
-            run_shell_command(&format!("ip link set dev {} up", br_name), Some(&tap_name))?;
+            run_shell_command(
+                &format!("ip link set dev {} up", br_name),
+                Some(&tap_name),
+                &config.node,
+            )?;
             // Add TAP
             run_shell_command(
                 &format!("ip link set dev {} master {}", tap_name, br_name),
                 Some(&tap_name),
+                &config.node,
             )?;
 
             if let Some(ext) = &bridge_cfg.external_interface {
@@ -208,6 +216,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                 run_shell_command(
                     &format!("ip link set dev {} master {}", ext, br_name),
                     Some(&tap_name),
+                    &config.node,
                 )?;
             }
         }
@@ -216,81 +225,109 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         {
             // Try create (ignore error if exists)
             // Note: macOS bridges are usually bridge0, bridge1. User should probably use "bridge0".
-            let _ = run_shell_command(&format!("ifconfig {} create", br_name), Some(&tap_name));
+            let _ = run_shell_command(
+                &format!("ifconfig {} create", br_name),
+                Some(&tap_name),
+                &config.node,
+            );
 
             // Add TAP
             run_shell_command(
                 &format!("ifconfig {} addm {}", br_name, tap_name),
                 Some(&tap_name),
+                &config.node,
             )?;
 
             if let Some(ext) = &bridge_cfg.external_interface {
                 run_shell_command(
                     &format!("ifconfig {} addm {}", br_name, ext),
                     Some(&tap_name),
+                    &config.node,
                 )?;
             }
             // Up
-            run_shell_command(&format!("ifconfig {} up", br_name), Some(&tap_name))?;
+            run_shell_command(
+                &format!("ifconfig {} up", br_name),
+                Some(&tap_name),
+                &config.node,
+            )?;
         }
     }
 
     // Execute Up Script
     if let Some(cmd) = &config.node.up_script {
         info!("Running up script: {}", cmd);
-        run_shell_command(cmd, Some(&tap_name))?;
+        run_shell_command(cmd, Some(&tap_name), &config.node)?;
     }
 
     // 3. Setup Transport
     let transport = Arc::new(Transport::new(&config.node)?);
     let endpoint = transport.endpoint.clone();
 
-    // 4. Connect to Peers
-    let mut sieves: HashMap<String, Arc<Mutex<Sieve>>> = HashMap::new();
+    // 4. Mesh State (Central Sieve for all peers)
+    let sieve = Arc::new(Mutex::new(Sieve::new(
+        config.node.bonding_mode,
+        config.node.mtu,
+    )));
+
+    // IP -> Logical Name mapping for incoming connections
+    let mut ip_to_peer = HashMap::new();
+    for peer in &config.peers {
+        for addr in &peer.endpoints {
+            ip_to_peer.insert(addr.ip(), peer.name.clone());
+        }
+    }
+    let ip_to_peer = Arc::new(ip_to_peer);
 
     for peer_cfg in config.peers {
-        let mut sieve = Sieve::new(config.node.bonding_mode);
-        for (idx, peer_addr) in peer_cfg.endpoints.iter().enumerate() {
-            match transport.connect(*peer_addr, "localhost").await {
-                Ok(conn) => {
-                    info!("Connected to peer {} at {}", peer_cfg.name, peer_addr);
+        let sieve_clone = sieve.clone();
+        let node_streams = config.node.streams;
+        let peer_name = peer_cfg.name.clone();
+        let endpoints = peer_cfg.endpoints.clone();
+        let transport_clone = transport.clone();
 
-                    // Open streams if configured
-                    let mut streams = Vec::new();
-                    if let Some(n) = config.node.streams {
-                        if n > 0 {
-                            info!("Opening {} streams for peer {}", n, peer_cfg.name);
+        for (idx, peer_addr) in endpoints.into_iter().enumerate() {
+            let s_inner = sieve_clone.clone();
+            let t_inner = transport_clone.clone();
+            let p_name = peer_name.clone();
+
+            tokio::spawn(async move {
+                match t_inner.connect(peer_addr, "localhost").await {
+                    Ok(conn) => {
+                        info!("Connected to peer {} at {}", p_name, peer_addr);
+
+                        let mut streams = Vec::new();
+                        if let Some(n) = node_streams {
                             for _ in 0..n {
-                                match conn.open_uni().await {
-                                    Ok(s) => streams.push(s),
-                                    Err(e) => error!("Failed to open stream: {}", e),
+                                if let Ok(s) = conn.open_uni().await {
+                                    streams.push(s);
                                 }
                             }
                         }
-                    }
 
-                    let link = Link::new(idx, format!("{}-{}", peer_cfg.name, idx), conn, streams);
-                    sieve.add_link(link);
+                        let link = Link::new(idx, format!("{}-{}", p_name, idx), conn, streams);
+                        let mut s = s_inner.lock().await;
+                        s.add_link(p_name, link);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to connect to peer {} at {}: {}",
+                            p_name, peer_addr, e
+                        );
+                    }
                 }
-                Err(e) => {
-                    error!(
-                        "Failed to connect to peer {} at {}: {}",
-                        peer_cfg.name, peer_addr, e
-                    );
-                }
-            }
+            });
         }
-        sieves.insert(peer_cfg.name.clone(), Arc::new(Mutex::new(sieve)));
     }
 
     // Stats Updater
     let stats_state = state.clone();
-    let stats_sieves: Vec<(String, Arc<Mutex<Sieve>>)> =
-        sieves.iter().map(|(n, s)| (n.clone(), s.clone())).collect();
+    let stats_sieve = sieve.clone();
     let stats_rx = global_rx.clone();
     let stats_tx = global_tx.clone();
 
     tokio::spawn(async move {
+        let mut keepalive_counter = 0;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             let mut s = stats_state.lock().await;
@@ -299,27 +336,23 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
             s.tx_bytes = stats_tx.load(Ordering::Relaxed);
 
             let mut peers = Vec::new();
-            for (name, sieve_mutex) in &stats_sieves {
-                let sieve = sieve_mutex.lock().await;
-                let link_stats = sieve.get_stats();
+            {
+                let mut sieve_inner = stats_sieve.lock().await;
+                let link_stats = sieve_inner.get_stats();
 
-                // Display best link stats
-                let (rtt, bw, inflight) = if !link_stats.is_empty() {
-                    let best = link_stats.iter().min_by_key(|(_, s)| s.rtt_ms).unwrap();
-                    (best.1.rtt_ms, best.1.bandwidth_mbps, best.1.inflight_bytes)
-                } else {
-                    (0, 0.0, 0)
-                };
+                for (l_name, s_snap) in link_stats {
+                    peers.push(PeerState {
+                        name: l_name,
+                        endpoints: vec![], // Details already in name/stats
+                        stats: s_snap,
+                    });
+                }
 
-                peers.push(PeerState {
-                    name: name.clone(),
-                    endpoints: link_stats.iter().map(|(n, _)| n.clone()).collect(),
-                    stats: LinkStatsSnapshot {
-                        rtt_ms: rtt,
-                        bandwidth_mbps: bw,
-                        inflight_bytes: inflight,
-                    },
-                });
+                keepalive_counter += 1;
+                if keepalive_counter >= 5 {
+                    sieve_inner.send_keepalives();
+                    keepalive_counter = 0;
+                }
             }
             s.peers = peers;
         }
@@ -332,19 +365,36 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     let endpoint_clone = endpoint.clone();
     let tap_writer_clone = tap_writer.clone();
     let rx_counter_base = global_rx.clone();
+    let sieve_incoming = sieve.clone();
 
     tokio::spawn(async move {
         while let Some(conn) = endpoint_clone.accept().await {
-            let connection = conn.await.unwrap(); // Handshake
+            let connection = match conn.await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Handshake failed: {}", e);
+                    continue;
+                }
+            };
+
             info!(
                 "Accepted incoming connection from {}",
                 connection.remote_address()
             );
             let tap_writer = tap_writer_clone.clone();
             let rx_counter_conn = rx_counter_base.clone();
+            let sieve_conn = sieve_incoming.clone();
+            let remote_addr = connection.remote_address();
+            let ip_to_peer_inner = ip_to_peer.clone();
 
             // Spawn per-connection handler
             tokio::spawn(async move {
+                // Find logical peer name by IP
+                let logical_peer_name = ip_to_peer_inner
+                    .get(&remote_addr.ip())
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}", remote_addr.ip()));
+
                 let reassembler = Arc::new(Mutex::new(Reassembler::new()));
 
                 // 1. Datagram Handler
@@ -361,9 +411,16 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                                 let mut r = r_dgram.lock().await;
                                 match r.accept(data) {
                                     Ok(Some(frame)) => {
-                                        let mut writer = tw_dgram.lock().await;
-                                        if let Err(e) = writer.write_packet(&frame).await {
+                                        let mut writer_lock = tw_dgram.lock().await;
+                                        if let Err(e) = writer_lock.write_packet(&frame).await {
                                             error!("Failed to write to TAP: {}", e);
+                                        }
+                                        // Learning MAC
+                                        if frame.len() >= 12 {
+                                            let mut src_mac = [0u8; 6];
+                                            src_mac.copy_from_slice(&frame[6..12]);
+                                            let mut s = sieve_conn.lock().await;
+                                            s.learn_mac(src_mac, logical_peer_name.clone());
                                         }
                                     }
                                     Ok(None) => {}
@@ -438,10 +495,8 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                         if n == 0 { continue; }
                         tx_counter.fetch_add(n as u64, Ordering::Relaxed);
                         let frame = buf.split().freeze();
-                        for sieve in sieves.values() {
-                            let mut s = sieve.lock().await;
-                            s.send_on_links(frame.clone()).await;
-                        }
+                        let mut s = sieve.lock().await;
+                        s.send_on_links(frame).await;
                         buf.reserve(65535);
                     }
                     Err(e) => {
@@ -464,7 +519,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     // Execute Down Script
     if let Some(cmd) = &config.node.down_script {
         info!("Running down script: {}", cmd);
-        let _ = run_shell_command(cmd, Some(&tap_name)); // Ignore error on shutdown?
+        let _ = run_shell_command(cmd, Some(&tap_name), &config.node); // Ignore error on shutdown?
     }
 
     Ok(())
@@ -562,12 +617,26 @@ async fn get_state(
     axum::Json(s.clone())
 }
 
-fn run_shell_command(cmd: &str, iface: Option<&str>) -> anyhow::Result<()> {
+fn run_shell_command(
+    cmd: &str,
+    iface: Option<&str>,
+    config: &crate::config::NodeConfig,
+) -> anyhow::Result<()> {
     let mut command = std::process::Command::new("sh");
     command.arg("-c").arg(cmd);
     if let Some(i) = iface {
         command.env("LAMINAR_IFACE", i);
     }
+    if let Some(ip) = &config.ipv4_address {
+        command.env("LAMINAR_IP", ip);
+    }
+    if let Some(mask) = &config.ipv4_mask {
+        command.env("LAMINAR_MASK", mask);
+    }
+    if let Some(gw) = &config.ipv4_gateway {
+        command.env("LAMINAR_GW", gw);
+    }
+
     let status = command.status()?;
 
     if !status.success() {

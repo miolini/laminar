@@ -5,8 +5,6 @@ use rand::Rng;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,20 +68,12 @@ impl Classifier {
     }
 }
 
-#[allow(dead_code)]
-pub struct LinkStats {
-    pub rtt: Duration,
-    pub bandwidth_estimate: u64, // bytes per second
-    pub inflight: usize,         // bytes currently sent but not acked (approx)
-}
-
 use quinn::Connection;
 
 #[allow(dead_code)]
 pub struct Link {
     pub id: usize,
     pub name: String,
-    pub stats: Arc<StdMutex<LinkStats>>,
     pub connection: Connection,
     pub streams: Vec<Arc<TokioMutex<quinn::SendStream>>>,
     pub next_stream: usize,
@@ -99,11 +89,6 @@ impl Link {
         Self {
             id,
             name,
-            stats: Arc::new(StdMutex::new(LinkStats {
-                rtt: Duration::from_millis(100), // Default start
-                bandwidth_estimate: 1_000_000,   // 1MB/s default
-                inflight: 0,
-            })),
             connection,
             streams: streams
                 .into_iter()
@@ -114,97 +99,143 @@ impl Link {
     }
 }
 
+use std::collections::HashMap;
+
 pub struct Sieve {
-    links: Vec<Link>,
+    peers: HashMap<String, Vec<Link>>,
+    mac_table: HashMap<[u8; 6], String>,
     fragmenter: Fragmenter,
     mode: BondingMode,
+    mtu: u16,
 }
 
 impl Sieve {
-    pub fn new(mode: BondingMode) -> Self {
+    pub fn new(mode: BondingMode, mtu: u16) -> Self {
         Self {
-            links: Vec::new(),
+            peers: HashMap::new(),
+            mac_table: HashMap::new(),
             fragmenter: Fragmenter::new(),
             mode,
+            mtu,
         }
     }
 
-    pub fn add_link(&mut self, link: Link) {
-        self.links.push(link);
+    pub fn add_link(&mut self, peer_name: String, link: Link) {
+        self.peers.entry(peer_name).or_default().push(link);
+    }
+
+    pub fn learn_mac(&mut self, mac: [u8; 6], peer_name: String) {
+        // Only learn if not already mapped or update if changed
+        self.mac_table.insert(mac, peer_name);
     }
 
     pub async fn send_on_links(&mut self, frame: Bytes) {
-        if self.links.is_empty() {
+        if self.peers.is_empty() {
             return;
         }
 
         let class = Classifier::classify(&frame);
-        let mtu = 1200;
+        let frame_hash = self.calculate_flow_hash(&frame);
+        let mtu = self.mtu as usize - 40; // Conservative overhead for LaminarHeader + QUIC/UDP/IP
         let fragments = self.fragmenter.split(frame.clone(), mtu);
 
+        // Determine destination peers
+        let dst_mac = if frame.len() >= 6 {
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&frame[0..6]);
+            Some(mac)
+        } else {
+            None
+        };
+
+        let target_peer = dst_mac.and_then(|mac| {
+            if mac == [0xff; 6] {
+                None // Broadcast
+            } else {
+                self.mac_table.get(&mac).cloned()
+            }
+        });
+
+        match target_peer {
+            Some(peer_name) => {
+                // Unicast: Send to specific peer
+                if let Some(links) = self.peers.get_mut(&peer_name) {
+                    Self::send_to_links(links, class, fragments, self.mode, frame_hash).await;
+                }
+            }
+            None => {
+                // Broadcast or Unknown: Flood to all peers
+                for links in self.peers.values_mut() {
+                    // Note: In real mesh, we should avoid loops.
+                    // Here we just send to all configured peers.
+                    Self::send_to_links(links, class, fragments.clone(), self.mode, frame_hash)
+                        .await;
+                }
+            }
+        }
+    }
+
+    async fn send_to_links(
+        links: &mut Vec<Link>,
+        class: TrafficClass,
+        fragments: Vec<Bytes>,
+        mode: BondingMode,
+        frame_hash: u64,
+    ) {
         match class {
             TrafficClass::Interactive => {
-                // Interactive always prefers best latency regardless of bonding mode
-                if let Some(best_link) = self.get_best_latency_link() {
+                if let Some(best_link) = links.iter_mut().min_by(|a, b| {
+                    let rtt_a = a.connection.rtt();
+                    let rtt_b = b.connection.rtt();
+                    rtt_a.cmp(&rtt_b)
+                }) {
                     for frag in fragments {
                         let _ = best_link.connection.send_datagram(frag);
                     }
                 }
             }
-            TrafficClass::Bulk => match self.mode {
+            TrafficClass::Bulk => match mode {
                 BondingMode::WaterFilling => {
-                    let link_indices = self.get_link_ids();
                     for (i, frag) in fragments.into_iter().enumerate() {
-                        let link_idx = link_indices[i % link_indices.len()];
-                        self.send_frag(link_idx, frag);
+                        let link_idx = i % links.len();
+                        Self::send_frag_on_link(&mut links[link_idx], frag);
                     }
                 }
                 BondingMode::Random => {
-                    let link_indices = self.get_link_ids();
                     let mut rng = rand::thread_rng();
                     for frag in fragments {
-                        let random_idx = rng.gen_range(0..link_indices.len());
-                        let link_idx = link_indices[random_idx];
-                        self.send_frag(link_idx, frag);
+                        let random_idx = rng.gen_range(0..links.len());
+                        Self::send_frag_on_link(&mut links[random_idx], frag);
                     }
                 }
                 BondingMode::Sticky => {
-                    let link_indices = self.get_link_ids();
-                    let hash = self.calculate_flow_hash(&frame);
-                    let idx = (hash as usize) % link_indices.len();
-                    let link_id = link_indices[idx];
-
+                    let idx = (frame_hash as usize) % links.len();
                     for frag in fragments {
-                        self.send_frag(link_id, frag);
+                        Self::send_frag_on_link(&mut links[idx], frag);
                     }
                 }
             },
         }
     }
 
-    fn send_frag(&mut self, link_id: usize, frag: Bytes) {
-        if let Some(link) = self.links.iter_mut().find(|l| l.id == link_id) {
-            if !link.streams.is_empty() {
-                // Use Stream Bonding (Round Robin within the link)
-                let stream_idx = link.next_stream % link.streams.len();
-                link.next_stream = link.next_stream.wrapping_add(1);
+    fn send_frag_on_link(link: &mut Link, frag: Bytes) {
+        if !link.streams.is_empty() {
+            let stream_idx = link.next_stream % link.streams.len();
+            link.next_stream = link.next_stream.wrapping_add(1);
 
-                let stream_mutex = &link.streams[stream_idx];
+            let stream_mutex = &link.streams[stream_idx];
+            let len = frag.len() as u16;
+            let len_bytes = len.to_be_bytes();
+            let frag_clone = frag.clone();
+            let stream_clone = stream_mutex.clone();
 
-                let len = frag.len() as u16;
-                let len_bytes = len.to_be_bytes();
-                let frag_clone = frag.clone();
-                let stream_clone = stream_mutex.clone();
-
-                tokio::spawn(async move {
-                    let mut s = stream_clone.lock().await;
-                    let _ = s.write_all(&len_bytes).await;
-                    let _ = s.write_all(&frag_clone).await;
-                });
-            } else {
-                // Use Datagrams
-                let _ = link.connection.send_datagram(frag);
-            }
+            tokio::spawn(async move {
+                let mut s = stream_clone.lock().await;
+                let _ = s.write_all(&len_bytes).await;
+                let _ = s.write_all(&frag_clone).await;
+            });
+        } else {
+            let _ = link.connection.send_datagram(frag);
         }
     }
 
@@ -232,32 +263,41 @@ impl Sieve {
         hasher.finish()
     }
 
-    fn get_best_latency_link(&self) -> Option<&Link> {
-        self.links.iter().min_by(|a, b| {
-            let s_a = a.stats.lock().unwrap();
-            let s_b = b.stats.lock().unwrap();
-            s_a.rtt.cmp(&s_b.rtt)
-        })
-    }
-
-    pub fn get_link_ids(&self) -> Vec<usize> {
-        self.links.iter().map(|l| l.id).collect()
-    }
-
     pub fn get_stats(&self) -> Vec<(String, crate::state::LinkStatsSnapshot)> {
-        self.links
-            .iter()
-            .map(|l| {
-                let stats = l.stats.lock().unwrap();
-                (
+        let mut all_stats = Vec::new();
+        for peer_links in self.peers.values() {
+            for l in peer_links {
+                let q_stats = l.connection.stats();
+                let rtt = l.connection.rtt();
+
+                all_stats.push((
                     l.name.clone(),
                     crate::state::LinkStatsSnapshot {
-                        rtt_ms: stats.rtt.as_millis() as u64,
-                        bandwidth_mbps: (stats.bandwidth_estimate as f64 * 8.0) / 1_000_000.0,
-                        inflight_bytes: stats.inflight,
+                        rtt_ms: rtt.as_millis() as u64,
+                        bandwidth_mbps: (q_stats.path.sent_packets as f64 * 8.0) / 1_000_000.0, // Placeholder for actual BW
+                        inflight_bytes: q_stats.path.cwnd as usize, // approximate
                     },
-                )
-            })
-            .collect()
+                ));
+            }
+        }
+        all_stats
+    }
+
+    pub fn send_keepalives(&mut self) {
+        let header = crate::protocol::LaminarHeader {
+            frame_id: 0,
+            total_frags: 1,
+            frag_index: 0,
+            packet_type: crate::protocol::PacketType::Keepalive,
+        };
+        let mut buf = bytes::BytesMut::with_capacity(crate::protocol::LaminarHeader::SIZE);
+        header.encode(&mut buf);
+        let data = buf.freeze();
+
+        for links in self.peers.values_mut() {
+            for link in links {
+                let _ = link.connection.send_datagram(data.clone());
+            }
+        }
     }
 }

@@ -147,11 +147,13 @@ pub struct Reassembler {
     partial_frames: BTreeMap<u64, PartialFrame>,
 }
 
+use std::time::Instant;
+
 struct PartialFrame {
     total_frags: u8,
     received_frags: u8,
     chunks: BTreeMap<u8, Bytes>,
-    // TODO: timestamp for expiration
+    created_at: Instant,
 }
 
 impl Reassembler {
@@ -166,6 +168,10 @@ impl Reassembler {
         let header = LaminarHeader::decode(&mut packet)?;
         let payload = packet; // remaining bytes
 
+        if header.packet_type == PacketType::Keepalive {
+            return Ok(None);
+        }
+
         if header.total_frags == 1 {
             // Optimized path for unfragmented
             return Ok(Some(payload));
@@ -178,6 +184,7 @@ impl Reassembler {
                 total_frags: header.total_frags,
                 received_frags: 0,
                 chunks: BTreeMap::new(),
+                created_at: Instant::now(),
             });
 
         // Duplicate check
@@ -209,15 +216,26 @@ impl Reassembler {
             return Ok(Some(full_frame.freeze()));
         }
 
-        // Cleanup old frames? (Naive approach implementation needed for production)
-        if self.partial_frames.len() > 100 {
-            // Simple purge of oldest
+        // Cleanup old/stale frames
+        self.cleanup();
+
+        Ok(None)
+    }
+
+    pub fn cleanup(&mut self) {
+        let now = Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+
+        // Remove frames older than 5 seconds or if map is too large
+        self.partial_frames
+            .retain(|_, frame| now.duration_since(frame.created_at) < timeout);
+
+        if self.partial_frames.len() > 1000 {
+            // Hard limit to prevent memory bloat if retention is too slow
             if let Some(&first_key) = self.partial_frames.keys().next() {
                 self.partial_frames.remove(&first_key);
             }
         }
-
-        Ok(None)
     }
 }
 

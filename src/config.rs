@@ -18,6 +18,9 @@ pub struct NodeConfig {
     pub down_script: Option<String>,
     pub mac_address: Option<String>,
     pub dhcp: Option<bool>,
+    pub ipv4_address: Option<String>,
+    pub ipv4_mask: Option<String>,
+    pub ipv4_gateway: Option<String>,
     pub dns: Option<Vec<String>>,
     // Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
     pub streams: Option<usize>,

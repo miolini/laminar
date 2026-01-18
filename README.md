@@ -21,11 +21,12 @@ It leverages **QUIC Datagrams** to provide a strictly unreliable transport layer
 ## ✨ Key Features
 
 - **🌊 Multi-Path Bonding**: Aggregate bandwidth from multiple interfaces (e.g., 5G + Fiber).
-- **🕸️ L2 Bridging**: Seamlessly bridge your local Ethernet segment (`eth0`) with the mesh (`tap0`), extending your LAN globally.
-- **⚡ Traffic Sieve**: Intelligent packet classification that routes interactive traffic (VoIP, SSH) via the lowest latency link and bulk traffic (File Transfer) via the highest bandwidth pipes.
-- **🛡️ Custom Fragmentation**: Handles MTUs larger than the underlying path (1500+ bytes) without relying on IP fragmentation.
-- **🔒 Security**: End-to-end encryption using **TLS 1.3** (via QUIC).
-- **📊 Observability**: Built-in interactive **TUI** and local **REST API** for real-time monitoring.
+- **🕸️ L2 Learning Bridge**: Automatically learns MAC addresses to implement efficient Unicast switching, minimizing mesh flooding.
+- **⚡ Traffic Sieve**: Intelligent packet classification that routes interactive traffic (VoIP, SSH) via the lowest latency link and bulk traffic via the highest bandwidth pipes.
+- **🛡️ Custom Fragmentation**: Handles MTUs larger than the underlying path (e.g., 9000-byte jumbo frames) with a TTL-based garbage collector to prevent memory leaks.
+- **🚀 Parallel Dialing**: Connects to all multi-path endpoints in parallel for near-instant initialization.
+- **🔒 Security**: End-to-end encryption using **TLS 1.3** and safe QUIC handshakes.
+- **📊 Observability**: Built-in interactive **TUI** and local **REST API** with real-time RTT/CWND monitoring.
 
 ## 🏗️ Architecture
 
@@ -81,12 +82,18 @@ struct LaminarHeader {
 
 #### Packet Lifecycle
 1.  **Ingress**: 9000-byte Jumbo Frame arrives from TAP.
-2.  **Slicing**: Fragmenter cuts it into 7 chunks (~1300 bytes each).
+2.  **Slicing**: Fragmenter cuts it into chunks based on path MTU.
 3.  **Encapsulation**: Each chunk gets an 11-byte `LaminarHeader`.
 4.  **Transport**: Each chunk is sent as a separate **QUIC Datagram**.
-5.  **Reassembly**: Receiver waits for all fragments of `frame_id`. Once complete, it's injected into the target TAP.
+5.  **Reassembly**: Receiver waits for all fragments. If a fragment is missing, the frame is garbage-collected after 5 seconds to prevent memory bloat.
 
-### 3. Multi-path QUIC Datagrams & Congestion
+### 3. MAC Learning & Unicast Switching
+Laminar acts as a "Learning Bridge". It inspects the source MAC of incoming packets to build a mapping of MAC addresses to logical Peer IDs.
+- **Unicast**: If the destination MAC is known, the frame is sent **only** to the specific peer.
+- **Broadcast/Multicast**: Flooded to all known peers in the mesh.
+- **Result**: Drastically reduced bandwidth usage compared to simple hub-style VPNs.
+
+### 4. Multi-path QUIC Datagrams & Congestion
 Laminar spawns **one QUIC Endpoint per physical interface**.
 - Interface `eth0` -> Connection A
 - Interface `wlan0` -> Connection B
@@ -153,6 +160,10 @@ listen = "[::]:9000"
 tap_name = "laminar0"
 mtu = 1420
 mac_address = "02:00:00:00:00:01"
+dhcp = false
+ipv4_address = "10.100.0.1"
+ipv4_mask = "255.255.255.0"
+ipv4_gateway = "10.100.0.254"
 
 # TLS Identity
 private_key = "key.pem"
@@ -170,8 +181,20 @@ streams = 4
 #external_interface = "eth1"
 
 # Network Setup Hooks
-up_script = "ip link set dev laminar0 up && ip addr add 10.100.0.1/24 dev laminar0"
-down_script = "echo 'Shutting down'"
+# Variables available: $LAMINAR_IFACE, $LAMINAR_IP, $LAMINAR_MASK, $LAMINAR_GW
+up_script = """
+if [ "$(uname)" = "Darwin" ]; then
+    # Use config variables if set, otherwise fallback
+    IP=${LAMINAR_IP:-10.100.0.1}
+    MASK=${LAMINAR_MASK:-255.255.255.0}
+    ifconfig $LAMINAR_IFACE $IP $IP netmask $MASK up
+else
+    IP=${LAMINAR_IP:-10.100.0.1}
+    MASK=${LAMINAR_MASK:-24}
+    ip link set dev $LAMINAR_IFACE up && ip addr add $IP/$MASK dev $LAMINAR_IFACE
+fi
+"""
+down_script = "echo 'Shutting down $LAMINAR_IFACE'"
 
 # Peer Definitions
 [[peers]]
@@ -213,12 +236,13 @@ Target API: `http://127.0.0.1:3000/state`.
 
 ## 🛣️ Roadmap
 
-- [x] Multi-path QUIC Datagrams
-- [x] Custom Fragmentation Protocol
+- [x] Multi-path QUIC Datagrams (Parallel Dialing)
+- [x] Custom Fragmentation Protocol (TTL Reassembly GC)
 - [x] Traffic Sieve (Interactive vs Bulk)
+- [x] MAC Learning Bridge (Unicast Switching)
 - [x] Bonding Modes (Water-Filling, Sticky)
 - [x] L2 Bridging
-- [x] Local API & TUI
+- [x] Local API & TUI (Real-time RTT/CWND)
 - [ ] Forward Error Correction (FEC)
 - [ ] Dynamic Peer Discovery (DHT)
 - [ ] NAT Traversal / Hole Punching
@@ -251,12 +275,16 @@ Add to your `flake.nix`:
 { config, pkgs, ... }: {
   services.laminar = {
     enable = true;
-    listenAddress = "[::]";
-    listenPort = 9000;
+    listen = "[::]:9000";
     
-    # Path to secret key (should be deployed via sops-nix or agenix)
+    # Path to secret key
     privateKeyFile = "/run/secrets/laminar/key.pem";
     
+    # Static Network Configuration (optional, defaults to DHCP)
+    dhcp = false;
+    ipv4Address = "10.100.0.1";
+    ipv4Mask = "255.255.255.0";
+
     # Peer Configuration
     peers = {
       "site-b" = {

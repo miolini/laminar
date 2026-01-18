@@ -109,6 +109,9 @@
               dns = cfg.dns;
               up_script = cfg.upScript;
               down_script = cfg.downScript;
+              ipv4_address = cfg.ipv4Address;
+              ipv4_mask = cfg.ipv4Mask;
+              ipv4_gateway = cfg.ipv4Gateway;
             } // lib.optionalAttrs (cfg.tapName != null) {
               tap_name = cfg.tapName;
             } // lib.optionalAttrs (cfg.bridge != null) {
@@ -193,6 +196,24 @@
             downScript = lib.mkOption {
               type = lib.types.nullOr lib.types.str;
               default = null;
+            };
+            
+            ipv4Address = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Static IPv4 address to assign to the interface.";
+            };
+
+            ipv4Mask = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Static IPv4 mask to assign to the interface.";
+            };
+
+            ipv4Gateway = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Static IPv4 gateway to assign to the interface.";
             };
 
             peers = lib.mkOption {
