@@ -251,16 +251,22 @@ Target API: `http://127.0.0.1:3000/state`.
 
 Laminar is designed to be a first-class citizen on NixOS.
 
-### 1. Flake Integration
-Add to your `flake.nix`:
+### 1. Add Flake Input
+Add the Laminar repository to your `flake.nix` inputs:
 
 ```nix
 {
-  inputs.laminar.url = "github:miolini/laminar";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    # Add the Laminar repository
+    laminar.url = "github:miolini/laminar";
+  };
 
   outputs = { self, nixpkgs, laminar, ... }: {
-    nixosConfigurations.my-router = nixpkgs.lib.nixosSystem {
+    nixosConfigurations.my-node = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
       modules = [
+        # Import the module
         laminar.nixosModules.default
         ./configuration.nix
       ];
