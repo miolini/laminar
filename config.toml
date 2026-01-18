@@ -28,6 +28,7 @@ addresses = [
     { address = "fd00::1/64", gateway = "fd00::ff" },
 ]
 dns = ["8.8.8.8", "1.1.1.1"]
+api_bind = ["127.0.0.1:3000"]
 
 # Lifecycle Hooks
 up_script = """
@@ -36,7 +37,11 @@ for addr in $LAMINAR_ADDRS; do
     if [ "$(uname)" = "Darwin" ]; then
         # macOS ifconfig workaround (strips CIDR, needs IP twice)
         IP=$(echo $addr | cut -d/ -f1)
-        ifconfig $LAMINAR_IFACE $IP $IP up
+        if echo $addr | grep -q ":"; then
+            ifconfig $LAMINAR_IFACE inet6 $IP $IP prefixlen 64 up
+        else
+            ifconfig $LAMINAR_IFACE $IP $IP up
+        fi
     else
         ip addr add $addr dev $LAMINAR_IFACE || true
         ip link set dev $LAMINAR_IFACE up
@@ -46,7 +51,11 @@ done
 # Setup gateways
 for gw in $LAMINAR_GATEWAYS; do
     if [ "$(uname)" = "Darwin" ]; then
-        route add default $gw || true
+        if echo $gw | grep -q ":"; then
+            route add -inet6 default $gw || true
+        else
+            route add default $gw || true
+        fi
     else
         ip route add default via $gw || true
     fi
@@ -56,7 +65,7 @@ down_script = "echo 'Shutting down $LAMINAR_IFACE'"
 
 [[peers]]
 name = "site-b"
-# Base64 encoded public key of the peer (for future mutual auth)
-public_key = "MCowBQYDK2VwAyEAvAxfuZMRiUvhTzqKYVWq4sWZaFm04w6IvV3u5EeyGJw="
-# List of physical endpoints for this peer to bond across. Can be mixed IPv4 and IPv6.
-endpoints = ["192.168.1.5:9000", "[2001:db8::1]:9000"]
+# Base64 encoded public key of the peer
+public_key = "PASTE_PEER_PUBLIC_KEY_HERE"
+# List of physical endpoints for this peer
+endpoints = ["192.168.1.5:9000"]

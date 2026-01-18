@@ -1,7 +1,7 @@
 use base64::prelude::*;
 use quinn::{Connection, Endpoint};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -11,6 +11,8 @@ use x509_parser::prelude::*;
 
 pub struct Transport {
     pub endpoint: Endpoint,
+    pub cert_chain: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
 }
 
 impl Transport {
@@ -22,7 +24,9 @@ impl Transport {
             }
         }
         let verifier = Arc::new(PeerVerifier { pinned_keys });
-        let server_config = configure_server(config, verifier.clone())?;
+        let (cert_chain, key) = load_identity(&config.private_key)?;
+        let server_config =
+            configure_server(cert_chain.clone(), key.clone_key(), verifier.clone())?;
 
         // Manual socket creation for dual-stack support
         let addr = config.listen;
@@ -66,7 +70,11 @@ impl Transport {
             Arc::new(quinn::TokioRuntime),
         )?;
 
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            cert_chain,
+            key,
+        })
     }
     pub async fn connect(
         &self,
@@ -81,7 +89,7 @@ impl Transport {
             }
         }
         let verifier = Arc::new(PeerVerifier { pinned_keys });
-        let client_cfg = configure_client(verifier);
+        let client_cfg = configure_client(verifier, self.cert_chain.clone(), self.key.clone_key())?;
         // connect_with takes ClientConfig directly? No, Endpoint is configured or we use connect_with
         let connection = self
             .endpoint
@@ -92,11 +100,10 @@ impl Transport {
 }
 
 fn configure_server(
-    config: &crate::config::NodeConfig,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
     verifier: Arc<PeerVerifier>,
 ) -> anyhow::Result<quinn::ServerConfig> {
-    let (cert_chain, key) = load_identity(&config.private_key)?;
-
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(cert_chain, key)?;
@@ -145,18 +152,22 @@ fn load_identity(
     Ok((cert_chain, priv_key))
 }
 
-fn configure_client(verifier: Arc<PeerVerifier>) -> quinn::ClientConfig {
+fn configure_client(
+    verifier: Arc<PeerVerifier>,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> anyhow::Result<quinn::ClientConfig> {
     let mut crypto = rustls::ClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
+        .with_client_auth_cert(cert_chain, key)
+        .map_err(|e| anyhow::anyhow!("Failed to set client auth: {}", e))?;
 
     crypto.dangerous().set_certificate_verifier(verifier);
     crypto.alpn_protocols = vec![b"laminar".to_vec()];
 
     // Fix: Wrap into QuicClientConfig
     // QuicClientConfig needs to be created from rustls::ClientConfig
-    // Note: unwrap is safe here as long as crypto is valid for QUIC (TLS 1.3)
-    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap();
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
     let mut transport_config = quinn::TransportConfig::default();
@@ -164,7 +175,7 @@ fn configure_client(verifier: Arc<PeerVerifier>) -> quinn::ClientConfig {
     transport_config.datagram_send_buffer_size(1024 * 1024);
     client_config.transport_config(Arc::new(transport_config));
 
-    client_config
+    Ok(client_config)
 }
 
 #[derive(Debug)]

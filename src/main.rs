@@ -169,22 +169,31 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         sieve: sieve_state.clone(),
     };
 
-    tokio::spawn(async move {
+    let api_binds = config
+        .node
+        .api_bind
+        .clone()
+        .unwrap_or_else(|| vec!["127.0.0.1:3000".to_string()]);
+
+    for bind_addr in api_binds {
         let app = axum::Router::new()
             .route("/state", axum::routing::get(get_state))
             .route("/speedtest", axum::routing::post(handle_speedtest))
-            .with_state(api_state);
-        // Bind to 127.0.0.1:3000
-        match tokio::net::TcpListener::bind("127.0.0.1:3000").await {
-            Ok(listener) => {
-                if let Err(e) = axum::serve(listener, app).await {
-                    error!("API Server Error: {}", e);
+            .with_state(api_state.clone());
+
+        let addr = bind_addr.clone();
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(&addr).await {
+                Ok(listener) => {
+                    info!("API Server running at http://{}", addr);
+                    if let Err(e) = axum::serve(listener, app).await {
+                        error!("API Server ({}) Error: {}", addr, e);
+                    }
                 }
+                Err(e) => error!("Failed to bind API port {}: {}", addr, e),
             }
-            Err(e) => error!("Failed to bind API port: {}", e),
-        }
-    });
-    info!("API Server running at http://127.0.0.1:3000");
+        });
+    }
 
     // 2. Setup TAP
     let interface = Interface::new(config.node.tap_name.clone(), config.node.mtu)?;

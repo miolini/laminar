@@ -113,6 +113,7 @@
                 address = a.address;
                 gateway = if a.gateway != "" then a.gateway else null;
               }) cfg.addresses;
+              api_bind = cfg.apiBind;
             } // lib.optionalAttrs (cfg.tapName != null) {
               tap_name = cfg.tapName;
             } // lib.optionalAttrs (cfg.bridge != null) {
@@ -188,6 +189,12 @@
             dns = lib.mkOption {
               type = lib.types.listOf lib.types.str;
               default = [ "8.8.8.8" "1.1.1.1" ];
+            };
+
+            apiBind = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ "127.0.0.1:3000" ];
+              description = "List of API bind addresses.";
             };
 
             upScript = lib.mkOption {

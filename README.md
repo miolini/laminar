@@ -172,6 +172,7 @@ addresses = [
     { address = "10.100.0.1/24", gateway = "10.100.0.254" },
     { address = "fd00::1/64", gateway = "fd00::ff" }
 ]
+api_bind = ["127.0.0.1:3000", "[::1]:3000"]
 
 # TLS Identity (Base64 encoded DER)
 private_key = "MC4CAQAwBQYDK2VwBCIEIP..."
