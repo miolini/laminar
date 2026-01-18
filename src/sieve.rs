@@ -138,6 +138,12 @@ impl Sieve {
         self.peers.entry(peer_name).or_default().push(link);
     }
 
+    pub fn get_peer_links(&self, peer_name: &str) -> Option<Vec<quinn::Connection>> {
+        self.peers
+            .get(peer_name)
+            .map(|links| links.iter().map(|l| l.connection.clone()).collect())
+    }
+
     pub fn learn_mac(&mut self, mac: [u8; 6], peer_name: String) {
         // Only learn if not already mapped or update if changed
         self.mac_table.insert(mac, peer_name);

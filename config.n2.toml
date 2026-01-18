@@ -6,7 +6,7 @@ mtu = 1420
 # Name of the interface to create
 # tap_name = "laminar0"
 # TLS Identity Private Key (Base64 encoded DER)
-private_key = "MFECAQEwBQYDK2VwBCIEIO5kIs8rIJb03hWoqovuvTbriNzrSJWiF4ZouYB4bgjWgSEADP/bL4no1OaRfpJX/7yJtnM2yfOs8nvGQ/lB8S8I4co="
+private_key = "FECAQEwBQYDK2VwBCIEIGpqICkPzP0n0vRuZvIGjhAYprhHAbBVFYkeBSo6BnTDgSEAvAxfuZMRiUvhTzqKYVWq4sWZaFm04w6IvV3u5EeyGJw="
 
 # Scaling: Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
 streams = 4
@@ -57,6 +57,6 @@ down_script = "echo 'Shutting down $LAMINAR_IFACE'"
 [[peers]]
 name = "site-b"
 # Base64 encoded public key of the peer (for future mutual auth)
-public_key = "MCowBQYDK2VwAyEAvAxfuZMRiUvhTzqKYVWq4sWZaFm04w6IvV3u5EeyGJw="
+public_key = "MCowBQYDK2VwAyEADP/bL4no1OaRfpJX/7yJtnM2yfOs8nvGQ/lB8S8I4co="
 # List of physical endpoints for this peer to bond across. Can be mixed IPv4 and IPv6.
 endpoints = ["192.168.1.5:9000", "[2001:db8::1]:9000"]

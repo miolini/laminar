@@ -132,6 +132,7 @@ fn load_identity(
 
     let subject_alt_names = vec!["localhost".to_string(), "laminar-node".to_string()];
     let mut params = rcgen::CertificateParams::new(subject_alt_names);
+    params.alg = &rcgen::PKCS_ED25519;
     params.key_pair = Some(key_pair);
 
     let cert = rcgen::Certificate::from_params(params)?;

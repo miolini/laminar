@@ -49,11 +49,7 @@ enum Commands {
         config: String,
     },
     /// Generate a new private key
-    GenKeys {
-        /// Output path for private key
-        #[arg(long, default_value = "key.pem")]
-        key: String,
-    },
+    GenKeys,
     /// Validate configuration file
     Validate {
         /// Path to the configuration file
@@ -66,6 +62,18 @@ enum Commands {
         #[arg(short, long)]
         watch: bool,
         /// API URL (default: http://127.0.0.1:3000)
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        api: String,
+    },
+    /// Run speedtest against a peer
+    Speedtest {
+        /// Peer name to test against
+        #[arg(short, long)]
+        peer: String,
+        /// Number of parallel threads
+        #[arg(short, long, default_value = "4")]
+        threads: usize,
+        /// API URL
         #[arg(long, default_value = "http://127.0.0.1:3000")]
         api: String,
     },
@@ -85,13 +93,14 @@ async fn main() -> anyhow::Result<()> {
         config: "config.toml".to_string(),
     }) {
         Commands::Run { config } => run_daemon(&config).await,
-        Commands::GenKeys { key } => generate_keys(&key),
+        Commands::GenKeys => generate_keys(),
         Commands::Validate { config } => validate_config(&config),
         Commands::Show { watch, api } => show_state(watch, &api).await,
+        Commands::Speedtest { peer, threads, api } => speedtest_client(&peer, threads, &api).await,
     }
 }
 
-fn generate_keys(_key_path: &str) -> anyhow::Result<()> {
+fn generate_keys() -> anyhow::Result<()> {
     // Generate a new Ed25519 key pair
     let key_pair = rcgen::KeyPair::generate(&rcgen::PKCS_ED25519)
         .map_err(|e| anyhow::anyhow!("Failed to generate key: {}", e))?;
@@ -102,13 +111,8 @@ fn generate_keys(_key_path: &str) -> anyhow::Result<()> {
     let pub_der = key_pair.public_key_der();
     let pub_b64 = BASE64_STANDARD.encode(&pub_der);
 
-    println!("--- Laminar Key Generation ---");
-    println!("Private Key (Keep Secret!):");
-    println!("{}", priv_b64);
-    println!("\nPublic Key (Share with Peers):");
-    println!("{}", pub_b64);
-    println!("\nCopy the Private Key into your [node] config.");
-    println!("Share the Public Key with peers for pinning.");
+    println!("Private Key: {}", priv_b64);
+    println!("Public Key:  {}", pub_b64);
 
     Ok(())
 }
@@ -148,11 +152,27 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     let global_rx = Arc::new(AtomicU64::new(0));
     let global_tx = Arc::new(AtomicU64::new(0));
 
+    // 3. Setup Transport
+    let peer_public_keys: Vec<String> = config.peers.iter().map(|p| p.public_key.clone()).collect();
+    let transport = Arc::new(Transport::new(&config.node, peer_public_keys.clone())?);
+    let endpoint = transport.endpoint.clone();
+
+    // 4. Mesh State (Central Sieve for all peers)
+    let sieve_state = Arc::new(Mutex::new(Sieve::new(
+        config.node.bonding_mode,
+        config.node.mtu,
+    )));
+
     // Spawn API
-    let api_state = state.clone();
+    let api_state = ApiState {
+        node: state.clone(),
+        sieve: sieve_state.clone(),
+    };
+
     tokio::spawn(async move {
         let app = axum::Router::new()
             .route("/state", axum::routing::get(get_state))
+            .route("/speedtest", axum::routing::post(handle_speedtest))
             .with_state(api_state);
         // Bind to 127.0.0.1:3000
         match tokio::net::TcpListener::bind("127.0.0.1:3000").await {
@@ -273,17 +293,6 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         run_shell_command(cmd, Some(&tap_name), &config.node)?;
     }
 
-    // 3. Setup Transport
-    let peer_public_keys: Vec<String> = config.peers.iter().map(|p| p.public_key.clone()).collect();
-    let transport = Arc::new(Transport::new(&config.node, peer_public_keys.clone())?);
-    let endpoint = transport.endpoint.clone();
-
-    // 4. Mesh State (Central Sieve for all peers)
-    let sieve = Arc::new(Mutex::new(Sieve::new(
-        config.node.bonding_mode,
-        config.node.mtu,
-    )));
-
     // IP -> Logical Name mapping for incoming connections
     let mut ip_to_peer = HashMap::new();
     for peer in &config.peers {
@@ -294,7 +303,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     let ip_to_peer = Arc::new(ip_to_peer);
 
     for peer_cfg in config.peers {
-        let sieve_clone = sieve.clone();
+        let sieve_clone = sieve_state.clone();
         let node_streams = config.node.streams;
         let peer_pub_key = peer_cfg.public_key.clone();
         let peer_name = peer_cfg.name.clone();
@@ -338,7 +347,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
 
     // Stats Updater
     let stats_state = state.clone();
-    let stats_sieve = sieve.clone();
+    let stats_sieve = sieve_state.clone();
     let stats_rx = global_rx.clone();
     let stats_tx = global_tx.clone();
 
@@ -381,7 +390,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     let endpoint_clone = endpoint.clone();
     let tap_writer_clone = tap_writer.clone();
     let rx_counter_base = global_rx.clone();
-    let sieve_incoming = sieve.clone();
+    let sieve_incoming = sieve_state.clone();
 
     tokio::spawn(async move {
         while let Some(conn) = endpoint_clone.accept().await {
@@ -511,7 +520,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                         if n == 0 { continue; }
                         tx_counter.fetch_add(n as u64, Ordering::Relaxed);
                         let frame = buf.split().freeze();
-                        let mut s = sieve.lock().await;
+                        let mut s = sieve_state.lock().await;
                         s.send_on_links(frame).await;
                         buf.reserve(65535);
                     }
@@ -626,11 +635,136 @@ async fn run_tui(api_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
+struct ApiState {
+    node: SharedState,
+    sieve: Arc<Mutex<Sieve>>,
+}
+
 async fn get_state(
-    axum::extract::State(state): axum::extract::State<SharedState>,
+    axum::extract::State(state): axum::extract::State<ApiState>,
 ) -> axum::Json<NodeState> {
-    let s = state.lock().await;
+    let s = state.node.lock().await;
     axum::Json(s.clone())
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SpeedtestRequest {
+    peer: String,
+    threads: usize,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SpeedtestResponse {
+    bps: f64,
+    mbps: f64,
+}
+
+async fn handle_speedtest(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    axum::Json(req): axum::Json<SpeedtestRequest>,
+) -> axum::Json<SpeedtestResponse> {
+    let connections = {
+        let s = state.sieve.lock().await;
+        s.get_peer_links(&req.peer)
+    };
+
+    match connections {
+        Some(conns) if !conns.is_empty() => {
+            let result = perform_speedtest(conns, req.threads).await;
+            axum::Json(result)
+        }
+        _ => axum::Json(SpeedtestResponse {
+            bps: 0.0,
+            mbps: 0.0,
+        }),
+    }
+}
+
+async fn perform_speedtest(conns: Vec<quinn::Connection>, threads: usize) -> SpeedtestResponse {
+    let start = std::time::Instant::now();
+    let total_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut tasks = Vec::new();
+
+    // Use a fixed size dummy buffer to reduce allocations
+    let dummy_data = vec![0u8; 32768];
+    let dummy_bytes = bytes::Bytes::from(dummy_data);
+
+    for i in 0..threads {
+        let conn = conns[i % conns.len()].clone();
+        let bytes_acc = total_bytes.clone();
+        let payload = dummy_bytes.clone();
+
+        tasks.push(tokio::spawn(async move {
+            if let Ok(mut stream) = conn.open_uni().await {
+                let mut header_buf =
+                    bytes::BytesMut::with_capacity(crate::protocol::LaminarHeader::SIZE);
+                let header = crate::protocol::LaminarHeader {
+                    frame_id: 0,
+                    total_frags: 1,
+                    frag_index: 0,
+                    packet_type: crate::protocol::PacketType::Speedtest,
+                };
+                header.encode(&mut header_buf);
+                let header_bytes = header_buf.freeze();
+
+                let len = (header_bytes.len() + payload.len()) as u16;
+                let len_bytes = len.to_be_bytes();
+
+                // 10 seconds test
+                while start.elapsed().as_secs() < 10 {
+                    let _ = stream.write_all(&len_bytes).await;
+                    let _ = stream.write_all(&header_bytes).await;
+                    let _ = stream.write_all(&payload).await;
+                    bytes_acc.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                let _ = stream.finish();
+            }
+        }));
+    }
+
+    for t in tasks {
+        let _ = t.await;
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let total = total_bytes.load(std::sync::atomic::Ordering::Relaxed) as f64;
+    let bps = total / elapsed;
+    let mbps = (bps * 8.0) / 1_000_000.0;
+
+    SpeedtestResponse { bps, mbps }
+}
+
+async fn speedtest_client(peer: &str, threads: usize, api_url: &str) -> anyhow::Result<()> {
+    info!(
+        "Starting speedtest against peer: {} with {} threads",
+        peer, threads
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/speedtest", api_url))
+        .json(&SpeedtestRequest {
+            peer: peer.to_string(),
+            threads,
+        })
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let res = resp.json::<SpeedtestResponse>().await?;
+        println!("----------------------------------------");
+        println!("Speedtest Results for Peer: {}", peer);
+        println!("Threads: {}", threads);
+        println!(
+            "Throughput: {:.2} Mbps ({:.2} MB/s)",
+            res.mbps,
+            res.bps / 1_000_000.0
+        );
+        println!("----------------------------------------");
+    } else {
+        error!("Speedtest failed: {}", resp.status());
+    }
+    Ok(())
 }
 
 fn run_shell_command(

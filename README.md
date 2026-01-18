@@ -153,7 +153,7 @@ Laminar uses a `TOML` configuration file.
 Each node requires a private key for TLS identity.
 
 ```bash
-./target/release/laminar gen-keys --key key.pem
+./target/release/laminar gen-keys
 ```
 
 ### 2. `config.toml` Reference

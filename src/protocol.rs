@@ -17,6 +17,7 @@ pub enum PacketType {
     Ethernet = 0x01,
     Keepalive = 0x02,
     Config = 0x03,
+    Speedtest = 0x04,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -26,6 +27,7 @@ impl TryFrom<u8> for PacketType {
             0x01 => Ok(PacketType::Ethernet),
             0x02 => Ok(PacketType::Keepalive),
             0x03 => Ok(PacketType::Config),
+            0x04 => Ok(PacketType::Speedtest),
             _ => Err(()),
         }
     }
@@ -170,7 +172,9 @@ impl Reassembler {
         let header = LaminarHeader::decode(&mut packet)?;
         let payload = packet; // remaining bytes
 
-        if header.packet_type == PacketType::Keepalive {
+        if header.packet_type == PacketType::Keepalive
+            || header.packet_type == PacketType::Speedtest
+        {
             return Ok(None);
         }
 
