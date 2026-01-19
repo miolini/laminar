@@ -26,7 +26,7 @@ It leverages **QUIC Datagrams** to provide a strictly unreliable transport layer
 - **🛡️ Custom Fragmentation**: Handles MTUs larger than the underlying path (e.g., 9000-byte jumbo frames) with a TTL-based garbage collector to prevent memory leaks.
 - **🚀 Parallel Dialing**: Connects to all multi-path endpoints in parallel for near-instant initialization.
 - **🔒 Strong Security**: Mutual TLS 1.3 with mandatory Public Key Pinning (Strong PFS) for all mesh connections.
-- **📊 Observability**: Built-in interactive **TUI** and local **REST API** with real-time RTT/CWND monitoring.
+- **📊 Observability**: Built-in **speedtest** command for direct peer-to-peer performance testing.
 
 ## 🏗️ Architecture
 
@@ -172,7 +172,6 @@ addresses = [
     { address = "10.100.0.1/24", gateway = "10.100.0.254" },
     { address = "fd00::1/64", gateway = "fd00::ff" }
 ]
-api_bind = ["127.0.0.1:3000", "[::1]:3000"]
 
 # TLS Identity (Base64 encoded DER)
 private_key = "MC4CAQAwBQYDK2VwBCIEIP..."
@@ -221,21 +220,16 @@ endpoints = ["192.168.1.5:9000", "[2001:db8::1]:9000"]
 sudo ./target/release/laminar run --config config.toml
 ```
 
-### Interactive Monitoring (TUI)
-Laminar includes a dashboard to view real-time stats (RTT, Bandwidth, Uptime).
+### Speedtest
+Test network performance directly between peers:
 
 ```bash
-./target/release/laminar show --watch
-```
-*(Requires the daemon to be running)*
+# Test against a configured peer
+./target/release/laminar speedtest --peer site-b --threads 8
 
-### One-Shot Status (JSON)
-Useful for scripts or external monitoring tools (Zabbix, Prometheus adapters).
-
-```bash
-./target/release/laminar show
+# Use custom config
+./target/release/laminar speedtest --config config.toml --peer site-b
 ```
-Target API: `http://127.0.0.1:3000/state`.
 
 ## 🛠️ Performance Tuning
 
@@ -251,7 +245,7 @@ Target API: `http://127.0.0.1:3000/state`.
 - [x] MAC Learning Bridge (Unicast Switching)
 - [x] Bonding Modes (Water-Filling, Sticky)
 - [x] L2 Bridging
-- [x] Local API & TUI (Real-time RTT/CWND)
+- [x] Built-in Speedtest (Direct QUIC)
 - [ ] Forward Error Correction (FEC)
 - [ ] Dynamic Peer Discovery (DHT)
 - [ ] NAT Traversal / Hole Punching

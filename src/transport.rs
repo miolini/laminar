@@ -76,6 +76,67 @@ impl Transport {
             key,
         })
     }
+
+    // Client-only constructor that binds to an ephemeral port
+    pub fn new_client(
+        private_key: &str,
+        listen_addr: std::net::SocketAddr,
+    ) -> anyhow::Result<Self> {
+        let (cert_chain, key) = load_identity(private_key)?;
+
+        let socket = socket2::Socket::new(
+            if listen_addr.is_ipv4() {
+                socket2::Domain::IPV4
+            } else {
+                socket2::Domain::IPV6
+            },
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+
+        // Bind to ephemeral port on same IP family as daemon
+        let bind_addr: std::net::SocketAddr = if listen_addr.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
+        socket.bind(&bind_addr.into())?;
+        socket.set_nonblocking(true)?;
+
+        let std_socket: std::net::UdpSocket = socket.into();
+
+        // Client config with increased timeout
+        let mut client_config =
+            quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            )?));
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config
+            .max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
+        client_config.transport_config(Arc::new(transport_config));
+
+        let endpoint = Endpoint::new(
+            Default::default(),
+            None,
+            std_socket,
+            Arc::new(quinn::TokioRuntime),
+        )?;
+        // Ideally we'd set the client config on the endpoint, but Endpoint::new takes server config.
+        // For client connections, we pass config to connect().
+        // Wait, Endpoint::new defaults don't apply to outgoing?
+        // Actually, we need to set the default client config on the endpoint, OR pass it during connect.
+        // Let's set it as default.
+        let mut endpoint = endpoint;
+        endpoint.set_default_client_config(client_config);
+
+        Ok(Self {
+            endpoint,
+            cert_chain,
+            key,
+        })
+    }
     pub async fn connect(
         &self,
         addr: SocketAddr,
@@ -116,7 +177,7 @@ fn configure_server(
 
     // Enable datagrams
     let mut transport_config = quinn::TransportConfig::default();
-    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(10).try_into().unwrap()));
+    transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
     transport_config.datagram_receive_buffer_size(Some(1024 * 1024));
     transport_config.datagram_send_buffer_size(1024 * 1024);
     server_config.transport_config(Arc::new(transport_config));
@@ -192,8 +253,19 @@ impl PeerVerifier {
         // Extract SPKI (Subject Public Key Info)
         let spki = cert.tbs_certificate.subject_pki.raw;
 
+        // Debug: log the SPKI and pinned keys
+        use base64::prelude::*;
+        let spki_b64 = BASE64_STANDARD.encode(spki);
+        warn!("Verifying certificate with SPKI: {}", spki_b64);
+        warn!("Have {} pinned keys", self.pinned_keys.len());
+        for (i, key) in self.pinned_keys.iter().enumerate() {
+            let key_b64 = BASE64_STANDARD.encode(key);
+            warn!("  Pinned key {}: {}", i, key_b64);
+        }
+
         // We compare the raw SPKI bytes with our pinned keys
         if self.pinned_keys.iter().any(|pinned| pinned == spki) {
+            warn!("Certificate pinning SUCCESS!");
             Ok(())
         } else {
             warn!("Certificate pinning failed! Unknown public key.");

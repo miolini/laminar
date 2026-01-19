@@ -26,8 +26,6 @@ pub struct NodeConfig {
     pub dhcp: Option<bool>,
     pub addresses: Option<Vec<AddressConfig>>,
     pub dns: Option<Vec<String>>,
-    // API bind addresses (default: 127.0.0.1:3000)
-    pub api_bind: Option<Vec<String>>,
     // Number of parallel streams per connection (0 = Use Datagrams/Unreliable)
     pub streams: Option<usize>,
     pub bridge: Option<BridgeConfig>,

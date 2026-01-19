@@ -18,6 +18,8 @@ pub enum PacketType {
     Keepalive = 0x02,
     Config = 0x03,
     Speedtest = 0x04,
+    ApiRequest = 0x05,
+    ApiResponse = 0x06,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -28,6 +30,8 @@ impl TryFrom<u8> for PacketType {
             0x02 => Ok(PacketType::Keepalive),
             0x03 => Ok(PacketType::Config),
             0x04 => Ok(PacketType::Speedtest),
+            0x05 => Ok(PacketType::ApiRequest),
+            0x06 => Ok(PacketType::ApiResponse),
             _ => Err(()),
         }
     }
@@ -174,6 +178,8 @@ impl Reassembler {
 
         if header.packet_type == PacketType::Keepalive
             || header.packet_type == PacketType::Speedtest
+            || header.packet_type == PacketType::ApiRequest
+            || header.packet_type == PacketType::ApiResponse
         {
             return Ok(None);
         }

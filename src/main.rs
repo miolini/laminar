@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::interface::Interface;
 use crate::protocol::Reassembler;
 use crate::sieve::{Link, Sieve};
-use crate::state::{NodeState, PeerState, SharedState};
+use crate::state::{NodeState, PeerState};
 use crate::transport::Transport;
 use base64::prelude::*;
 use std::collections::HashMap;
@@ -61,21 +61,21 @@ enum Commands {
         /// Watch mode (interactive TUI)
         #[arg(short, long)]
         watch: bool,
-        /// API URL (default: http://127.0.0.1:3000)
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        api: String,
+        /// Path to the configuration file
+        #[arg(short, long, default_value = "config.toml")]
+        config: String,
     },
     /// Run speedtest against a peer
     Speedtest {
+        /// Path to the configuration file
+        #[arg(short, long, default_value = "config.toml")]
+        config: String,
         /// Peer name to test against
         #[arg(short, long)]
         peer: String,
         /// Number of parallel threads
         #[arg(short, long, default_value = "4")]
         threads: usize,
-        /// API URL
-        #[arg(long, default_value = "http://127.0.0.1:3000")]
-        api: String,
     },
 }
 
@@ -85,9 +85,18 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
+
+    // Initialize logic
+    // Check if we are running in TUI mode
+    let is_tui = match &cli.command {
+        Some(Commands::Show { watch: true, .. }) => true,
+        _ => false,
+    };
+
+    if !is_tui {
+        tracing_subscriber::fmt::init();
+    }
 
     match cli.command.unwrap_or(Commands::Run {
         config: "config.toml".to_string(),
@@ -95,9 +104,27 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run { config } => run_daemon(&config).await,
         Commands::GenKeys => generate_keys(),
         Commands::Validate { config } => validate_config(&config),
-        Commands::Show { watch, api } => show_state(watch, &api).await,
-        Commands::Speedtest { peer, threads, api } => speedtest_client(&peer, threads, &api).await,
+        Commands::Show { watch, config } => show_state(watch, &config).await,
+        Commands::Speedtest {
+            config,
+            peer,
+            threads,
+        } => speedtest_client(&config, &peer, threads).await,
     }
+}
+
+// API Message Structures
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+enum ApiRequest {
+    GetState,
+    Speedtest { peer: String, threads: usize },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+enum ApiResponse {
+    State(NodeState),
+    SpeedtestResult { bps: f64, mbps: f64 },
+    Error(String),
 }
 
 fn generate_keys() -> anyhow::Result<()> {
@@ -153,7 +180,18 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     let global_tx = Arc::new(AtomicU64::new(0));
 
     // 3. Setup Transport
-    let peer_public_keys: Vec<String> = config.peers.iter().map(|p| p.public_key.clone()).collect();
+    // Extract our own public key from private key for localhost API connections
+    let own_public_key = {
+        let der = BASE64_STANDARD.decode(config.node.private_key.trim())?;
+        let key_pair = rcgen::KeyPair::from_der(&der)?;
+        let pub_der = key_pair.public_key_der();
+        BASE64_STANDARD.encode(&pub_der)
+    };
+
+    let mut peer_public_keys: Vec<String> =
+        config.peers.iter().map(|p| p.public_key.clone()).collect();
+    peer_public_keys.push(own_public_key); // Allow connections from ourselves (for API)
+
     let transport = Arc::new(Transport::new(&config.node, peer_public_keys.clone())?);
     let endpoint = transport.endpoint.clone();
 
@@ -163,37 +201,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         config.node.mtu,
     )));
 
-    // Spawn API
-    let api_state = ApiState {
-        node: state.clone(),
-        sieve: sieve_state.clone(),
-    };
-
-    let api_binds = config
-        .node
-        .api_bind
-        .clone()
-        .unwrap_or_else(|| vec!["127.0.0.1:3000".to_string()]);
-
-    for bind_addr in api_binds {
-        let app = axum::Router::new()
-            .route("/state", axum::routing::get(get_state))
-            .route("/speedtest", axum::routing::post(handle_speedtest))
-            .with_state(api_state.clone());
-
-        let addr = bind_addr.clone();
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(&addr).await {
-                Ok(listener) => {
-                    info!("API Server running at http://{}", addr);
-                    if let Err(e) = axum::serve(listener, app).await {
-                        error!("API Server ({}) Error: {}", addr, e);
-                    }
-                }
-                Err(e) => error!("Failed to bind API port {}: {}", addr, e),
-            }
-        });
-    }
+    // API removed - will be served over QUIC in future implementation
 
     // 2. Setup TAP
     let interface = Interface::new(config.node.tap_name.clone(), config.node.mtu)?;
@@ -400,6 +408,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     let tap_writer_clone = tap_writer.clone();
     let rx_counter_base = global_rx.clone();
     let sieve_incoming = sieve_state.clone();
+    let state_incoming = state.clone();
 
     tokio::spawn(async move {
         while let Some(conn) = endpoint_clone.accept().await {
@@ -418,6 +427,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
             let tap_writer = tap_writer_clone.clone();
             let rx_counter_conn = rx_counter_base.clone();
             let sieve_conn = sieve_incoming.clone();
+            let state_conn = state_incoming.clone();
             let remote_addr = connection.remote_address();
             let ip_to_peer_inner = ip_to_peer.clone();
 
@@ -436,6 +446,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                 let r_dgram = reassembler.clone();
                 let tw_dgram = tap_writer.clone();
                 let rx_dgram = rx_counter_conn.clone();
+                let sieve_dgram = sieve_conn.clone(); // Clone for datagram handler
 
                 tokio::spawn(async move {
                     loop {
@@ -453,7 +464,7 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                                         if frame.len() >= 12 {
                                             let mut src_mac = [0u8; 6];
                                             src_mac.copy_from_slice(&frame[6..12]);
-                                            let mut s = sieve_conn.lock().await;
+                                            let mut s = sieve_dgram.lock().await; // Use sieve_dgram
                                             s.learn_mac(src_mac, logical_peer_name.clone());
                                         }
                                     }
@@ -462,7 +473,17 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                error!("Datagram connection error: {}", e);
+                                match e {
+                                    quinn::ConnectionError::ApplicationClosed(e) => {
+                                        tracing::debug!("Connection closed usually: {}", e);
+                                    }
+                                    quinn::ConnectionError::ConnectionClosed(e) => {
+                                        tracing::debug!("Connection closed: {}", e);
+                                    }
+                                    _ => {
+                                        error!("Datagram connection error: {}", e);
+                                    }
+                                }
                                 break;
                             }
                         }
@@ -490,6 +511,23 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                                             Ok(_) => {
                                                 rx_stream.fetch_add(len as u64, Ordering::Relaxed);
                                                 let data = bytes::Bytes::from(buf);
+
+                                                // Check if this is an API packet
+                                                if let Ok(header) =
+                                                    crate::protocol::LaminarHeader::decode(
+                                                        &mut data.clone(),
+                                                    )
+                                                {
+                                                    if header.packet_type
+                                                        == crate::protocol::PacketType::ApiRequest
+                                                    {
+                                                        // Handle API request
+                                                        // TODO: Implement API handler
+                                                        info!("Received API request");
+                                                        continue;
+                                                    }
+                                                }
+
                                                 let mut r = r_inner.lock().await;
                                                 match r.accept(data) {
                                                     Ok(Some(frame)) => {
@@ -504,6 +542,166 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
                                         }
                                     }
                                     Err(_) => break,
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // 3. API Handler (Incoming Bi streams)
+                let conn_api = connection.clone();
+                let sieve_api = sieve_conn.clone();
+                let state_api = state_conn.clone();
+
+                tokio::spawn(async move {
+                    while let Ok((mut send, mut recv)) = conn_api.accept_bi().await {
+                        let sieve_inner = sieve_api.clone();
+                        let state_inner = state_api.clone();
+
+                        tokio::spawn(async move {
+                            // Read request header first
+                            let len = match recv.read_u16().await {
+                                Ok(l) => l,
+                                Err(_) => return,
+                            };
+
+                            let mut buf = vec![0u8; len as usize];
+                            if recv.read_exact(&mut buf).await.is_err() {
+                                return;
+                            }
+
+                            let data = bytes::Bytes::from(buf);
+                            let mut data_clone = data.clone();
+
+                            if let Ok(header) =
+                                crate::protocol::LaminarHeader::decode(&mut data_clone)
+                            {
+                                if header.packet_type == crate::protocol::PacketType::ApiRequest {
+                                    // Payload follows header
+                                    // The remaining bytes in 'data_clone' (which is a Slice of 'data')
+                                    // should be the JSON payload.
+                                    // However, decode() advances the buffer.
+
+                                    if let Ok(req) =
+                                        serde_json::from_slice::<ApiRequest>(&data_clone)
+                                    {
+                                        info!("Handling API Request: {:?}", req);
+                                        match req {
+                                            ApiRequest::GetState => {
+                                                let s = state_inner.lock().await;
+                                                let response = ApiResponse::State(s.clone());
+                                                // Send response
+                                                if let Ok(resp_bytes) =
+                                                    serde_json::to_vec(&response)
+                                                {
+                                                    let _ = send.write_all(&resp_bytes).await;
+                                                }
+                                                let _ = send.finish();
+                                            }
+                                            ApiRequest::Speedtest { peer, threads } => {
+                                                // Run speedtest logic
+                                                info!("Starting speedtest for peer {}", peer);
+                                                let links = {
+                                                    let s = sieve_inner.lock().await;
+                                                    s.get_peer_links(&peer)
+                                                };
+
+                                                if let Some(links) = links {
+                                                    if links.is_empty() {
+                                                        let _ = send
+                                                            .write_all(
+                                                                &serde_json::to_vec(
+                                                                    &ApiResponse::Error(
+                                                                        "No active links to peer"
+                                                                            .into(),
+                                                                    ),
+                                                                )
+                                                                .unwrap(),
+                                                            )
+                                                            .await;
+                                                        let _ = send.finish();
+                                                        return;
+                                                    }
+
+                                                    // Run the speedtest
+                                                    let start = std::time::Instant::now();
+                                                    let total_bytes = Arc::new(
+                                                        std::sync::atomic::AtomicU64::new(0),
+                                                    );
+                                                    let mut tasks = Vec::new();
+
+                                                    let dummy_data = vec![0u8; 32768];
+                                                    let dummy_bytes =
+                                                        bytes::Bytes::from(dummy_data);
+
+                                                    for i in 0..threads {
+                                                        let conn = links[i % links.len()].clone();
+                                                        let bytes_acc = total_bytes.clone();
+                                                        let payload = dummy_bytes.clone();
+
+                                                        tasks.push(tokio::spawn(async move {
+                                                            if let Ok(mut stream) = conn.open_uni().await {
+                                                                let mut header_buf =
+                                                                    bytes::BytesMut::with_capacity(crate::protocol::LaminarHeader::SIZE);
+                                                                let header = crate::protocol::LaminarHeader {
+                                                                    frame_id: 0,
+                                                                    total_frags: 1,
+                                                                    frag_index: 0,
+                                                                    packet_type: crate::protocol::PacketType::Speedtest,
+                                                                };
+                                                                header.encode(&mut header_buf);
+                                                                let header_bytes = header_buf.freeze();
+
+                                                                let len = (header_bytes.len() + payload.len()) as u16;
+                                                                let len_bytes = len.to_be_bytes();
+
+                                                                // 10 seconds test
+                                                                while start.elapsed().as_secs() < 10 {
+                                                                    let _ = stream.write_all(&len_bytes).await;
+                                                                    let _ = stream.write_all(&header_bytes).await;
+                                                                    let _ = stream.write_all(&payload).await;
+                                                                    bytes_acc.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
+                                                                }
+                                                                let _ = stream.finish();
+                                                            }
+                                                        }));
+                                                    }
+
+                                                    for t in tasks {
+                                                        let _ = t.await;
+                                                    }
+
+                                                    let elapsed = start.elapsed().as_secs_f64();
+                                                    let total = total_bytes
+                                                        .load(std::sync::atomic::Ordering::Relaxed)
+                                                        as f64;
+                                                    let bps = total / elapsed;
+                                                    let mbps = (bps * 8.0) / 1_000_000.0;
+
+                                                    let response =
+                                                        ApiResponse::SpeedtestResult { bps, mbps };
+                                                    if let Ok(resp_bytes) =
+                                                        serde_json::to_vec(&response)
+                                                    {
+                                                        let _ = send.write_all(&resp_bytes).await;
+                                                    }
+                                                    let _ = send.finish();
+                                                } else {
+                                                    let _ = send
+                                                        .write_all(
+                                                            &serde_json::to_vec(
+                                                                &ApiResponse::Error(
+                                                                    "Peer not found".into(),
+                                                                ),
+                                                            )
+                                                            .unwrap(),
+                                                        )
+                                                        .await;
+                                                    let _ = send.finish();
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -559,13 +757,69 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn show_state(watch: bool, api_url: &str) -> anyhow::Result<()> {
+async fn get_node_state(config: &crate::config::NodeConfig) -> anyhow::Result<NodeState> {
+    // Create client transport
+    let transport = crate::transport::Transport::new_client(&config.private_key, config.listen)?;
+
+    // Connect logic
+    let local_port = config.listen.port();
+    let local_addr: std::net::SocketAddr = format!("127.0.0.1:{}", local_port).parse()?;
+
+    // Extract own public key
+    let own_public_key = {
+        let der = BASE64_STANDARD.decode(config.private_key.trim())?;
+        let key_pair = rcgen::KeyPair::from_der(&der)?;
+        let pub_der = key_pair.public_key_der();
+        BASE64_STANDARD.encode(&pub_der)
+    };
+
+    let connection = transport
+        .connect(local_addr, "localhost", vec![own_public_key])
+        .await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
+
+    // Send Request
+    let request = ApiRequest::GetState;
+    let request_json = serde_json::to_vec(&request)?;
+
+    let mut header_buf = bytes::BytesMut::with_capacity(crate::protocol::LaminarHeader::SIZE);
+    let header = crate::protocol::LaminarHeader {
+        frame_id: 0,
+        total_frags: 1,
+        frag_index: 0,
+        packet_type: crate::protocol::PacketType::ApiRequest,
+    };
+    header.encode(&mut header_buf);
+    let header_bytes = header_buf.freeze();
+
+    let total_len = (header_bytes.len() + request_json.len()) as u16;
+    send.write_all(&total_len.to_be_bytes()).await?;
+    send.write_all(&header_bytes).await?;
+    send.write_all(&request_json).await?;
+    send.finish()?;
+
+    // Read Response
+    let resp_bytes = recv.read_to_end(1024 * 1024).await?;
+    if resp_bytes.is_empty() {
+        anyhow::bail!("Empty response");
+    }
+
+    let response: ApiResponse = serde_json::from_slice(&resp_bytes)?;
+    match response {
+        ApiResponse::State(s) => Ok(s),
+        ApiResponse::Error(e) => anyhow::bail!("API Error: {}", e),
+        _ => anyhow::bail!("Unexpected response type"),
+    }
+}
+
+async fn show_state(watch: bool, config_path: &str) -> anyhow::Result<()> {
+    let config = Config::load(config_path)?;
+
     if watch {
-        run_tui(api_url).await
+        run_tui(&config.node).await
     } else {
-        match reqwest::get(format!("{}/state", api_url)).await {
-            Ok(resp) => {
-                let state = resp.json::<NodeState>().await?;
+        match get_node_state(&config.node).await {
+            Ok(state) => {
                 println!("{}", serde_json::to_string_pretty(&state)?);
             }
             Err(e) => eprintln!("Failed to connect to API: {}", e),
@@ -574,16 +828,13 @@ async fn show_state(watch: bool, api_url: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn run_tui(api_url: &str) -> anyhow::Result<()> {
+async fn run_tui(config: &crate::config::NodeConfig) -> anyhow::Result<()> {
     std::io::stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
 
     loop {
-        let state_opt = match reqwest::get(format!("{}/state", api_url)).await {
-            Ok(r) => r.json::<NodeState>().await.ok(),
-            Err(_) => None,
-        };
+        let state_opt = get_node_state(config).await.ok();
 
         terminal.draw(|frame| {
             let layout = Layout::default()
@@ -644,135 +895,107 @@ async fn run_tui(api_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Clone)]
-struct ApiState {
-    node: SharedState,
-    sieve: Arc<Mutex<Sieve>>,
-}
+// Old HTTP API code removed - will implement QUIC-based API in future
 
-async fn get_state(
-    axum::extract::State(state): axum::extract::State<ApiState>,
-) -> axum::Json<NodeState> {
-    let s = state.node.lock().await;
-    axum::Json(s.clone())
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct SpeedtestRequest {
-    peer: String,
+async fn speedtest_client(
+    config_path: &str,
+    peer_name: &str,
     threads: usize,
-}
+) -> anyhow::Result<()> {
+    // Load configuration
+    let config = Config::load(config_path)?;
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SpeedtestResponse {
-    bps: f64,
-    mbps: f64,
-}
+    // Find the target peer (just for validation)
+    let _peer = config
+        .peers
+        .iter()
+        .find(|p| p.name == peer_name)
+        .ok_or_else(|| anyhow::anyhow!("Peer '{}' not found in config", peer_name))?;
 
-async fn handle_speedtest(
-    axum::extract::State(state): axum::extract::State<ApiState>,
-    axum::Json(req): axum::Json<SpeedtestRequest>,
-) -> axum::Json<SpeedtestResponse> {
-    let connections = {
-        let s = state.sieve.lock().await;
-        s.get_peer_links(&req.peer)
-    };
-
-    match connections {
-        Some(conns) if !conns.is_empty() => {
-            let result = perform_speedtest(conns, req.threads).await;
-            axum::Json(result)
-        }
-        _ => axum::Json(SpeedtestResponse {
-            bps: 0.0,
-            mbps: 0.0,
-        }),
-    }
-}
-
-async fn perform_speedtest(conns: Vec<quinn::Connection>, threads: usize) -> SpeedtestResponse {
-    let start = std::time::Instant::now();
-    let total_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut tasks = Vec::new();
-
-    // Use a fixed size dummy buffer to reduce allocations
-    let dummy_data = vec![0u8; 32768];
-    let dummy_bytes = bytes::Bytes::from(dummy_data);
-
-    for i in 0..threads {
-        let conn = conns[i % conns.len()].clone();
-        let bytes_acc = total_bytes.clone();
-        let payload = dummy_bytes.clone();
-
-        tasks.push(tokio::spawn(async move {
-            if let Ok(mut stream) = conn.open_uni().await {
-                let mut header_buf =
-                    bytes::BytesMut::with_capacity(crate::protocol::LaminarHeader::SIZE);
-                let header = crate::protocol::LaminarHeader {
-                    frame_id: 0,
-                    total_frags: 1,
-                    frag_index: 0,
-                    packet_type: crate::protocol::PacketType::Speedtest,
-                };
-                header.encode(&mut header_buf);
-                let header_bytes = header_buf.freeze();
-
-                let len = (header_bytes.len() + payload.len()) as u16;
-                let len_bytes = len.to_be_bytes();
-
-                // 10 seconds test
-                while start.elapsed().as_secs() < 10 {
-                    let _ = stream.write_all(&len_bytes).await;
-                    let _ = stream.write_all(&header_bytes).await;
-                    let _ = stream.write_all(&payload).await;
-                    bytes_acc.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
-                }
-                let _ = stream.finish();
-            }
-        }));
-    }
-
-    for t in tasks {
-        let _ = t.await;
-    }
-
-    let elapsed = start.elapsed().as_secs_f64();
-    let total = total_bytes.load(std::sync::atomic::Ordering::Relaxed) as f64;
-    let bps = total / elapsed;
-    let mbps = (bps * 8.0) / 1_000_000.0;
-
-    SpeedtestResponse { bps, mbps }
-}
-
-async fn speedtest_client(peer: &str, threads: usize, api_url: &str) -> anyhow::Result<()> {
     info!(
         "Starting speedtest against peer: {} with {} threads",
-        peer, threads
+        peer_name, threads
     );
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{}/speedtest", api_url))
-        .json(&SpeedtestRequest {
-            peer: peer.to_string(),
-            threads,
-        })
-        .send()
+
+    // Create transport with our identity (client-only, ephemeral port)
+    let transport =
+        crate::transport::Transport::new_client(&config.node.private_key, config.node.listen)?;
+
+    // Connect to LOCAL daemon (not remote peer!)
+    // Extract port from listen address
+    let local_port = config.node.listen.port();
+    let local_addr: std::net::SocketAddr = format!("127.0.0.1:{}", local_port).parse()?;
+
+    info!("Connecting to local daemon at {}", local_addr);
+
+    // Extract our own public key for localhost verification
+    let own_public_key = {
+        use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+        let der = BASE64_STANDARD.decode(config.node.private_key.trim())?;
+        let key_pair = rcgen::KeyPair::from_der(&der)?;
+        let pub_der = key_pair.public_key_der();
+        BASE64_STANDARD.encode(&pub_der)
+    };
+
+    // Connect to localhost with our own public key for verification
+    let connection = transport
+        .connect(local_addr, "localhost", vec![own_public_key])
         .await?;
 
-    if resp.status().is_success() {
-        let res = resp.json::<SpeedtestResponse>().await?;
-        println!("----------------------------------------");
-        println!("Speedtest Results for Peer: {}", peer);
-        println!("Threads: {}", threads);
-        println!(
-            "Throughput: {:.2} Mbps ({:.2} MB/s)",
-            res.mbps,
-            res.bps / 1_000_000.0
-        );
-        println!("----------------------------------------");
-    } else {
-        error!("Speedtest failed: {}", resp.status());
+    info!("Connected to local daemon");
+
+    // Send API request
+    let request = ApiRequest::Speedtest {
+        peer: peer_name.to_string(),
+        threads,
+    };
+
+    let request_json = serde_json::to_vec(&request)?;
+
+    // Open a bidirectional stream for request/response
+    let (mut send, mut recv) = connection.open_bi().await?;
+
+    // Send request with header
+    let mut header_buf = bytes::BytesMut::with_capacity(crate::protocol::LaminarHeader::SIZE);
+    let header = crate::protocol::LaminarHeader {
+        frame_id: 0,
+        total_frags: 1,
+        frag_index: 0,
+        packet_type: crate::protocol::PacketType::ApiRequest,
+    };
+    header.encode(&mut header_buf);
+    let header_bytes = header_buf.freeze();
+
+    let total_len = (header_bytes.len() + request_json.len()) as u16;
+    send.write_all(&total_len.to_be_bytes()).await?;
+    send.write_all(&header_bytes).await?;
+    send.write_all(&request_json).await?;
+    send.finish()?;
+
+    info!("Sent API request, waiting for response...");
+
+    // Read response
+    let resp_bytes = recv.read_to_end(1024 * 1024).await?;
+    if resp_bytes.is_empty() {
+        anyhow::bail!("Daemon closed connection without response");
     }
+
+    let response: ApiResponse = serde_json::from_slice(&resp_bytes)?;
+    match response {
+        ApiResponse::SpeedtestResult { bps, mbps } => {
+            println!("\n=== Speedtest Results ===");
+            println!("  Throughput: {:.2} Mbps", mbps);
+            println!("  Raw Rate:   {:.2} bps", bps);
+            println!("=========================\n");
+        }
+        ApiResponse::Error(e) => {
+            eprintln!("\nError from daemon: {}\n", e);
+        }
+        _ => {
+            eprintln!("\nUnexpected response type: {:?}\n", response);
+        }
+    }
+
     Ok(())
 }
 

@@ -1,6 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct NodeState {
@@ -25,4 +23,3 @@ pub struct LinkStatsSnapshot {
 }
 
 // Shared State Container
-pub type SharedState = Arc<Mutex<NodeState>>;
