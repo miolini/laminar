@@ -858,7 +858,7 @@ async fn run_tui(config: &crate::config::NodeConfig) -> anyhow::Result<()> {
                             p.name.clone(),
                             format!("{} ms", p.stats.rtt_ms),
                             format!("{:.2} Mbps", p.stats.bandwidth_mbps),
-                            format!("{}", p.stats.inflight_bytes),
+                            format!("{}", p.stats.congestion_window),
                         ])
                     })
                     .collect();
@@ -872,7 +872,7 @@ async fn run_tui(config: &crate::config::NodeConfig) -> anyhow::Result<()> {
                         Constraint::Percentage(20),
                     ],
                 )
-                .header(Row::new(vec!["Peer", "RTT", "Est. BW", "Inflight"]))
+                .header(Row::new(vec!["Peer", "RTT", "Est. BW", "CWND"]))
                 .block(Block::default().borders(Borders::ALL).title("Peers"));
 
                 frame.render_widget(table, layout[1]);

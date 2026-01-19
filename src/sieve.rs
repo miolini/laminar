@@ -308,7 +308,7 @@ impl Sieve {
                     crate::state::LinkStatsSnapshot {
                         rtt_ms: rtt.as_millis() as u64,
                         bandwidth_mbps: (q_stats.path.sent_packets as f64 * 8.0) / 1_000_000.0, // Placeholder for actual BW
-                        inflight_bytes: q_stats.path.cwnd as usize, // approximate
+                        congestion_window: q_stats.path.cwnd as usize,
                     },
                 ));
             }

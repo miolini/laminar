@@ -19,7 +19,7 @@ pub struct PeerState {
 pub struct LinkStatsSnapshot {
     pub rtt_ms: u64,
     pub bandwidth_mbps: f64,
-    pub inflight_bytes: usize,
+    pub congestion_window: usize,
 }
 
 // Shared State Container
