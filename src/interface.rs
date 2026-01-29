@@ -80,48 +80,53 @@ pub struct InterfaceReader {
 impl InterfaceReader {
     pub async fn read_packet(&mut self, buf: &mut BytesMut) -> io::Result<usize> {
         if self.is_l3 {
-            // Read into buffer, assuming it has capacity.
-            let start_len = buf.len();
+            // Zero-copy optimization: Reserve space for Ethernet header
+            buf.put_bytes(0, 14);
+            let header_len = 14;
+            let start_len = buf.len(); // Should be existing_len + 14
+
             let n = self.reader.read_buf(buf).await?;
             if n == 0 {
+                // EOF or empty
+                buf.truncate(start_len - header_len);
                 return Ok(0);
             }
 
             if n < 20 {
                 // Minimum IPv4 header
-                buf.truncate(start_len);
+                buf.truncate(start_len - header_len);
                 return Ok(0);
             }
+
+            // Packet data is at buf[start_len .. start_len + n]
+            // Header space is at buf[start_len - 14 .. start_len]
 
             let first_byte = buf[start_len];
             let ip_ver = first_byte >> 4;
 
             if ip_ver != 4 && ip_ver != 6 {
-                // Not IP, drop to maintain stream sanity
-                buf.truncate(start_len);
+                // Not IP, drop
+                buf.truncate(start_len - header_len);
                 return Ok(0);
             }
 
             let eth_type: u16 = if ip_ver == 6 { 0x86DD } else { 0x0800 };
 
-            // We need to insert 14 bytes (Eth Header) at start_len.
-            // BytesMut doesn't support easy insertion.
-            // We strip the read data out, then write header, then write data back.
-            let ip_data = buf.split_off(start_len);
-
-            // buf is now truncated to start_len.
-            // ip_data contains the packet.
-            // Put header into buf.
+            // Fill the reserved header space
             let mut header = [0u8; 14];
-            // Dst: Broadcast (ff:ff:ff:ff:ff:ff) for Sieve compatibility
-            header[0..6].fill(0xff);
-            // Src: Zero or random. 00:00:00:00:00:00 is fine.
-            // Type:
+            header[0..6].fill(0xff); // Dst: Broadcast
+            // Src: 00:00:00:00:00:00
             header[12] = (eth_type >> 8) as u8;
             header[13] = (eth_type & 0xff) as u8;
 
-            buf.put_slice(&header);
-            buf.put(ip_data); // appends the ip_data bytes
+            // Copy header into the reserved space
+            // BytesMut isn't a slice, but we can access via index if mutable?
+            // BytesMut implements AsMut<[u8]>. But self.reader.read_buf might have reallocated?
+            // "The returned BytesMut shares the underlying memory" -> No, read_buf modifies 'buf' in place.
+            // So we can index into it.
+
+            let buf_slice = &mut buf[start_len - 14..start_len];
+            buf_slice.copy_from_slice(&header);
 
             Ok(n + 14)
         } else {

@@ -234,6 +234,92 @@ async fn run_daemon(config_path: &str) -> anyhow::Result<()> {
         }
     }
 
+    // Apply Addresses
+    if let Some(addrs) = &config.node.addresses {
+        for addr_cfg in addrs {
+            info!("Adding address {} to {}", addr_cfg.address, tap_name);
+            let cidr = &addr_cfg.address;
+
+            // Linux implementation
+            #[cfg(target_os = "linux")]
+            run_shell_command(
+                &format!("ip addr add {} dev {}", cidr, tap_name),
+                Some(&tap_name),
+                &config.node,
+            )?;
+
+            // macOS implementation
+            #[cfg(target_os = "macos")]
+            {
+                // Simple parsing for IPv4/IPv6 detection
+                if cidr.contains(":") {
+                    // IPv6
+                    // macOS uses "inet6 <addr> prefixlen <len>"
+                    // input: fd00::1/64
+                    let parts: Vec<&str> = cidr.split('/').collect();
+                    if parts.len() == 2 {
+                        run_shell_command(
+                            &format!(
+                                "ifconfig {} inet6 {} prefixlen {}",
+                                tap_name, parts[0], parts[1]
+                            ),
+                            Some(&tap_name),
+                            &config.node,
+                        )?;
+                    } else {
+                        warn!("Invalid IPv6 CIDR format: {}", cidr);
+                    }
+                } else {
+                    // IPv4
+                    // macOS utun is usually P-t-P.
+                    // To act like a subnet, we often set dest as the broadcast or the gateway?
+                    // Common pattern: ifconfig utunX 10.100.0.1 10.100.0.1 netmask 255.255.255.0
+                    // But here we rely on the OS handling the mask.
+                    // "ifconfig utunX <addr> <dest>"
+                    // If we just want a standard interface address: "ifconfig utunX <addr>/<mask_len>" might work on newer macos,
+                    // but standard is "ifconfig utunX inet <addr> <dest> netmask <mask>"
+
+                    // Let's try the modern syntax "ifconfig utunX <addr/len>" first or fallback.
+                    // Actually, "ifconfig utunX 10.100.0.1/24" works on many BSDs but maybe not all macOS versions.
+                    // The safer macOS way for utun (POINTOPOINT) is:
+                    // ifconfig utunX 10.100.0.1 10.100.0.1
+                    // (setting dest to self makes it act somewhat like a loopback/interface addr).
+
+                    let parts: Vec<&str> = cidr.split('/').collect();
+                    if parts.len() == 2 {
+                        // We will try setting it as a point-to-point to itself for now to bring it UP with that IP.
+                        // For a mesh, usually we want the /24 to be reachable?
+                        // Let's just try "ifconfig <iface> <addr> <addr>"
+                        run_shell_command(
+                            &format!("ifconfig {} inet {} {}", tap_name, parts[0], parts[0]),
+                            Some(&tap_name),
+                            &config.node,
+                        )?;
+                        // And maybe the netmask/prefix
+                        // Actually, let's keep it simple. If the user provided a gateway, maybe use that as dest?
+                        if let Some(gw) = &addr_cfg.gateway {
+                            run_shell_command(
+                                &format!("ifconfig {} inet {} {}", tap_name, parts[0], gw),
+                                Some(&tap_name),
+                                &config.node,
+                            )?;
+                        } else {
+                            // alias?
+                            run_shell_command(
+                                &format!(
+                                    "ifconfig {} inet {} {} alias",
+                                    tap_name, parts[0], parts[0]
+                                ),
+                                Some(&tap_name),
+                                &config.node,
+                            )?; // ignore error if not alias
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Bridge Setup
     if let Some(bridge_cfg) = &config.node.bridge {
         let br_name = &bridge_cfg.name;
@@ -834,7 +920,8 @@ async fn run_tui(config: &crate::config::NodeConfig) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
 
     loop {
-        let state_opt = get_node_state(config).await.ok();
+        // Draw first to be responsive, then fetch
+        let state_res = get_node_state(config).await;
 
         terminal.draw(|frame| {
             let layout = Layout::default()
@@ -842,14 +929,19 @@ async fn run_tui(config: &crate::config::NodeConfig) -> anyhow::Result<()> {
                 .constraints(vec![Constraint::Length(3), Constraint::Min(0)])
                 .split(frame.area());
 
-            if let Some(state) = &state_opt {
-                let title = Paragraph::new(format!(
+            let status_text = match &state_res {
+                Ok(state) => format!(
                     "🌊 Laminar Node | Uptime: {}s | Rx: {} | Tx: {}",
                     state.uptime_secs, state.rx_bytes, state.tx_bytes
-                ))
-                .block(Block::default().borders(Borders::ALL).title("Status"));
-                frame.render_widget(title, layout[0]);
+                ),
+                Err(e) => format!("🔴 Disconnected: {}", e),
+            };
 
+            let title = Paragraph::new(status_text)
+                .block(Block::default().borders(Borders::ALL).title("Status"));
+            frame.render_widget(title, layout[0]);
+
+            if let Ok(state) = &state_res {
                 let rows: Vec<Row> = state
                     .peers
                     .iter()
@@ -876,8 +968,6 @@ async fn run_tui(config: &crate::config::NodeConfig) -> anyhow::Result<()> {
                 .block(Block::default().borders(Borders::ALL).title("Peers"));
 
                 frame.render_widget(table, layout[1]);
-            } else {
-                frame.render_widget(Paragraph::new("Connecting to Node API..."), layout[0]);
             }
         })?;
 
